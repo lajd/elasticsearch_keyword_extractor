@@ -37,7 +37,7 @@ class Extractor:
     def __init__(self, es_index_name, es_keyword_field, es_highlight_field,
                  keyword_stopwords='en', max_doc_keyterms=16, bsize=128, max_doc_qsize=256,
                  write_updates_to_mongo=False, mongo_db_name=None, mongo_collection_name=None,
-                 n_populating_threads=4, n_indexing_threads=4):
+                 n_extraction_threads=4, n_indexing_threads=4):
         """
         Args:
             es_index_name (str): Name of elasticsearch index
@@ -51,7 +51,7 @@ class Extractor:
             write_updates_to_mongo (bool): Whether to write updates to mongo instead of ES
             mongo_db_name (str): If inserting updates into mongo instead of ES, the database name to use
             mongo_collection_name (str):  If inserting updates into mongo instead of ES, the collection name to use
-            n_populating_threads (int): Number of threads for extracting keyterms, contexts and offsets
+            n_extraction_threads (int): Number of threads for extracting keyterms, contexts and offsets
             n_indexing_threads (int): Number of threads for inserting (keyterms, contexts, offsets) updates into ES/mongo
         """
         if keyword_stopwords is None:
@@ -78,7 +78,7 @@ class Extractor:
         self.updates = deque()
         self.indexed_doc_counter = 0
         # Helpers
-        self.task_manager = TaskCompletionManager(1, n_populating_threads, n_indexing_threads)
+        self.task_manager = TaskCompletionManager(1, n_extraction_threads, n_indexing_threads)
 
     def get_writer_and_formatter(self, write_updates_to_mongo, mongo_db_name, mongo_collection_name):
         if write_updates_to_mongo and mongo_db_name is not None and mongo_collection_name is not None:

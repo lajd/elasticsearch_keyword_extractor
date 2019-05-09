@@ -17,7 +17,7 @@ parser.add_argument('es_highlight_field', type=str, help='Name of elasticsearch 
 parser.add_argument('--max_doc_keyterms', type=int, default=16, required=False, help='Maximum numebr of keyterms to extract')
 parser.add_argument('--bsize', type=int, default=128, required=False, help='Read/write batch size')
 parser.add_argument('--max_doc_qsize', type=int, default=256, help='Maximum number of documents to be queued; limits memory usage')
-parser.add_argument('--n_populating_threads', type=int, default=4,
+parser.add_argument('--n_extraction_threads', type=int, default=4,
                     help='Number of threads to use for extracting contexts and offsets')
 parser.add_argument('--n_indexing_threads', type=int, default=4,
                     help='Number of threads to use for writing updates into mongo/ES')
