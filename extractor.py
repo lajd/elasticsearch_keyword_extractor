@@ -35,14 +35,18 @@ class TaskCompletionManager:
 
 class Extractor:
     def __init__(self, es_index_name, es_keyword_field, es_highlight_field,
+                 shard_size=100, min_doc_count=3, must_have_fields=[],
                  keyword_stopwords='en', max_doc_keyterms=16, bsize=128, max_doc_qsize=256,
                  write_updates_to_mongo=False, mongo_db_name=None, mongo_collection_name=None,
-                 n_extraction_threads=4, n_indexing_threads=4):
+                 n_extracting_threads=4, n_indexing_threads=4):
         """
         Args:
             es_index_name (str): Name of elasticsearch index
             es_keyword_field (str): Name of field in ES from which to extract significant text
             es_highlight_field (str): Name of field in ES from which to highlight and obtain contexts for keywords
+            shard_size (int): Shard size for significant text
+            min_doc_count (int): Min doc count for significant text
+            must_have_fields (list): Fields which must be in the document (in addition to keyword and highlight fields)
             keyword_stopwords (str): Set of tokens which are not allowed to be keywords
             max_doc_keyterms (int): Maximum number of keyterms to consider for each document
             bsize (int): Read batch size when pulling from ES
@@ -51,7 +55,7 @@ class Extractor:
             write_updates_to_mongo (bool): Whether to write updates to mongo instead of ES
             mongo_db_name (str): If inserting updates into mongo instead of ES, the database name to use
             mongo_collection_name (str):  If inserting updates into mongo instead of ES, the collection name to use
-            n_extraction_threads (int): Number of threads for extracting keyterms, contexts and offsets
+            n_extracting_threads (int): Number of threads for extracting keyterms, contexts and offsets
             n_indexing_threads (int): Number of threads for inserting (keyterms, contexts, offsets) updates into ES/mongo
         """
         if keyword_stopwords is None:
@@ -64,10 +68,13 @@ class Extractor:
         self.es_index_name = es_index_name
         self.es_keyword_field = es_keyword_field
         self.es_highlight_field = es_highlight_field
+        self.shard_size = shard_size
+        self.min_doc_count = min_doc_count
         self.keyword_stopwords = keyword_stopwords
         self.max_doc_qsize = max_doc_qsize
         self.max_doc_keyterms = max_doc_keyterms
         self.bsize = bsize
+        self.must_have_fields = must_have_fields
         # Elasticsearch/mongo connections
         self.es_utility = ESUtility(es_index_name, read_bsize=bsize)
         self.update_formatter, self.write_updater = self.get_writer_and_formatter(
@@ -78,7 +85,7 @@ class Extractor:
         self.updates = deque()
         self.indexed_doc_counter = 0
         # Helpers
-        self.task_manager = TaskCompletionManager(1, n_extraction_threads, n_indexing_threads)
+        self.task_manager = TaskCompletionManager(1, n_extracting_threads, n_indexing_threads)
 
     def get_writer_and_formatter(self, write_updates_to_mongo, mongo_db_name, mongo_collection_name):
         if write_updates_to_mongo and mongo_db_name is not None and mongo_collection_name is not None:
@@ -102,7 +109,9 @@ class Extractor:
         """
         batch = {'_ids': [], 'keyterms': []}
         batch_keyterms_queries = []
-        for i, doc_batch in enumerate(self.es_utility.scroll_indexed_data(size=self.bsize, only_ids=True), 1):
+        _must_have_fields = self.must_have_fields + [self.es_keyword_field, self.es_highlight_field]
+        for i, doc_batch in enumerate(self.es_utility.scroll_indexed_data(
+                size=self.bsize, only_ids=True, fields_must_exist=_must_have_fields), 1):
             # If the queue is full, wait
             while len(self.keyterms_query_batches) * self.bsize > self.max_doc_qsize:
                 time.sleep(1)
@@ -112,7 +121,7 @@ class Extractor:
                 batch['_ids'].append(_id)
                 keyterms_queries = [
                     {"index": self.es_index_name},
-                    get_keyterms_query(_id, self.es_keyword_field, self.max_doc_keyterms)
+                    get_keyterms_query(_id, self.es_keyword_field, self.max_doc_keyterms, self.shard_size, self.min_doc_count)
                 ]
                 batch_keyterms_queries.extend(keyterms_queries)
             # Add the batch to the queue

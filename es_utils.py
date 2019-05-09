@@ -17,24 +17,37 @@ class ESUtility:
             raise RuntimeError('Index {} not found'.format(index_name))
         self.read_bsize = read_bsize
     
-    def scroll_indexed_data(self, size=100, only_ids=False, randomized=False):
+    def scroll_indexed_data(self, size=100, only_ids=False, randomized=False, fields_must_exist=None):
+        if fields_must_exist is None:
+            default_body = {
+                    "query": {
+                        "match_all": {}
+                    },
+                }
+        else:
+            _must_exist = [{"exists": {"field": f}} for f in fields_must_exist]
+            _must_not_exist = [{"exists": {"field": "contexts"}}]
+            default_body = {
+                "query": {
+                    "bool": {
+                        "must": _must_exist,
+                        "must_not": _must_not_exist
+                    }
+                }
+            }
+
         if randomized:
             # Return random batches of data
             body = {
                 "query": {
                     "function_score": {
-                        "query": {"match_all": {}},
+                        "query": default_body['query'],
                         "random_score": {}
                     }
                 }
             }
         else:
-            # Return data in order
-            body = {
-                "query": {
-                    "match_all": {}
-                },
-            }
+            body = default_body
         
         if only_ids:
             # Return only the id field
@@ -116,7 +129,7 @@ class ESUtility:
         self.es.indices.create(index=index_name, body=body)
 
 
-def get_keyterms_query(_id, field_name, dg, min_doc_count=1, background_sample=100):
+def get_keyterms_query(_id, field_name, dg, shard_size=100, min_doc_count=3):
     query = {
         "size": 0,
         "query": {
@@ -127,7 +140,7 @@ def get_keyterms_query(_id, field_name, dg, min_doc_count=1, background_sample=1
         "aggregations": {
             "sample": {
                 "sampler": {
-                    "shard_size": background_sample
+                    "shard_size": shard_size
                 },
                 "aggregations": {
                     "keywords": {
@@ -168,7 +181,7 @@ def get_highlight_template(ids, keyterms, field_name, offsets=False, max_fragmen
         'query': {
             'bool': {
                 'filter': {'ids': {'values': ids}},
-                'must': [{'match': {field_name: ' '.join(keyterms)}}]
+                'should': [{'match': {field_name: ' '.join(keyterms)}}]
             }
         },
         "highlight": {
@@ -192,7 +205,11 @@ def get_highlight_template(ids, keyterms, field_name, offsets=False, max_fragmen
 def extract_keyterm_offsets_contexts(offsets, highlights, field_name, leftsep='<em>', rightsep='</em>'):
     offset = offsets['hits']['hits']
     highlight = highlights['hits']['hits']
-    assert len(offset) == len(highlight) == 1
+    try:
+        assert len(offset) == len(highlight) == 1
+    except Exception as e:
+        print()
+        return [], [], []
     term_offsets = list(chain(*[parse_offsets(line) for line in offset[0]['highlight'][field_name]]))
     keyterms = []
     contexts = []
