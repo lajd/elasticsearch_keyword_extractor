@@ -106,6 +106,7 @@ def get_keyterms_query(_id, field_name, dg, shard_size=100):
     """
     query = {
         "size": 0,
+        "stored_fields": [],
         "query": {
             "ids": {
                 "values": _id
@@ -153,6 +154,7 @@ def get_context_query(ids, keyterms, es_client, field_name):
 def get_highlight_template(ids, keyterms, field_name, offsets=False, max_fragments=8, fragment_size=100):
     _should_match = [{'match': {field_name: f}} for f in keyterms]
     template = {
+        "stored_fields": [],
         'query': {
             'bool': {
                 'filter': {'ids': {'values': ids}},
@@ -181,6 +183,12 @@ def extract_keyterm_offsets_contexts(offsets, highlights, field_name, leftsep='<
     _offset = offsets['hits']['hits']
     _highlight = highlights['hits']['hits']
     assert len(_offset) == len(_highlight) == 1
+    try:
+        _ = _offset[0]['highlight']
+        _ = _highlight[0]['highlight']
+    except KeyError:
+        # No highlight fields returned
+        return [], [], []
     term_offsets = list(chain(*[parse_offsets(line) for line in _offset[0]['highlight'][field_name]]))
     keyterms = []
     contexts = []

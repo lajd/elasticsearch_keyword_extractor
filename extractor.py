@@ -171,15 +171,19 @@ class Extractor:
             batch_keyterms, batch_contexts, batch_offsets = extract_contexts_from_queries(resp, self.es_highlight_field)
             #
             for _id, keyterms, contexts, offsets in zip(batch['_ids'], batch_keyterms, batch_contexts, batch_offsets):
-                _update = {
-                    '_id': _id,
-                    'body': {
-                        "keyterms": keyterms,
-                        'contexts': contexts,
-                        'offsets': offsets
+                if len(keyterms) == len(contexts) == len(offsets) == 0:
+                    # No highlight results could be returned; don't update this document
+                    continue
+                else:
+                    _update = {
+                        '_id': _id,
+                        'body': {
+                            "keyterms": keyterms,
+                            'contexts': contexts,
+                            'offsets': offsets
+                        }
                     }
-                }
-                self.updates.append(_update)
+                    self.updates.append(_update)
         # Notify that the thread has finished
         self.task_manager.add_completed('populating')
 
