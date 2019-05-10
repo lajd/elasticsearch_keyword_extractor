@@ -12,7 +12,7 @@ parser = argparse.ArgumentParser(
 parser.add_argument('es_index_name', type=str, help='Name of elasticsearch index')
 parser.add_argument('es_keyword_field', type=str, help='Name of elasticsearch field to extract keywords from')
 parser.add_argument('es_highlight_field', type=str, help='Name of elasticsearch field to extract highlights from')
-parser.add_argument('--shard_size', type=int, required=False, help='Shard size for significant text')
+parser.add_argument('--shard_size', type=int, required=False, default=100, help='Shard size for significant text')
 parser.add_argument('--must_have_fields', type=str, required=False, nargs='*', default=[],
                     help='Fields which must be contained in the document to be elligible for keyword extraction')
 parser.add_argument('--must_not_have_fields', type=str, required=False, nargs='*', default=[],

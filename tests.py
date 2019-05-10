@@ -123,7 +123,7 @@ def index_text_data(es, field_name, index_name, text_iterator, bsize=100, dummy_
         chunk.append({"_op_type": "index", "_index": index_name, "_type": "_doc", field_name: text, '_id': id_counter})
         id_counter += 1
         if id_counter % bsize == 0:
-            helpers.bulk(es, chunk, index=index_name, doc_type="_doc")
+            helpers.bulk(es, chunk, index=index_name, doc_type="_doc", refresh=True)
             chunk = []
     if len(chunk) > 0:
         helpers.bulk(es, chunk, index=index_name, doc_type="_doc", refresh=True)
