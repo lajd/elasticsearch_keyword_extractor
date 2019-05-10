@@ -13,8 +13,10 @@ parser.add_argument('es_index_name', type=str, help='Name of elasticsearch index
 parser.add_argument('es_keyword_field', type=str, help='Name of elasticsearch field to extract keywords from')
 parser.add_argument('es_highlight_field', type=str, help='Name of elasticsearch field to extract highlights from')
 parser.add_argument('--shard_size', type=int, required=False, help='Shard size for significant text')
-parser.add_argument('--min_doc_count', type=int, required=False, help='Min doc count for significant text')
-parser.add_argument('--must_have_fields', type=str, required=False, nargs='*', help='Min doc count for significant text')
+parser.add_argument('--must_have_fields', type=str, required=False, nargs='*',
+                    help='Fields which must be contained in the document to be elligible for keyword extraction')
+parser.add_argument('--must_not_have_fields', type=str, required=False, nargs='*',
+                    help='Fields which must not be contained in the document to be elligible for keyword extraction')
 # Optional arguments
 parser.add_argument('--max_doc_keyterms', type=int, default=16, required=False, help='Maximum numebr of keyterms to extract')
 parser.add_argument('--bsize', type=int, default=128, required=False, help='Read/write batch size')

@@ -17,24 +17,18 @@ class ESUtility:
             raise RuntimeError('Index {} not found'.format(index_name))
         self.read_bsize = read_bsize
     
-    def scroll_indexed_data(self, size=100, only_ids=False, randomized=False, fields_must_exist=None):
-        if fields_must_exist is None:
-            default_body = {
-                    "query": {
-                        "match_all": {}
-                    },
-                }
-        else:
-            _must_exist = [{"exists": {"field": f}} for f in fields_must_exist]
-            _must_not_exist = [{"exists": {"field": "contexts"}}]
-            default_body = {
-                "query": {
-                    "bool": {
-                        "must": _must_exist,
-                        "must_not": _must_not_exist
-                    }
+    def scroll_indexed_data(self, bsize=128, only_ids=False, randomized=False,
+                            fields_must_exist=[], fields_must_not_exist=[]):
+        fields_must_exist = list(set(fields_must_exist))
+        fields_must_not_exist = list(set(fields_must_not_exist))
+        default_body = {
+            "query": {
+                "bool": {
+                    "must": [{"exists": {"field": f}} for f in fields_must_exist],
+                    "must_not": [{"exists": {"field": f}} for f in fields_must_not_exist]
                 }
             }
+        }
 
         if randomized:
             # Return random batches of data
@@ -56,7 +50,7 @@ class ESUtility:
         data_scroll = self.es.search(
             index=self.index_name,
             scroll='5m',
-            size=size,
+            size=bsize,
             body=body,
         )
 
@@ -98,38 +92,18 @@ class ESUtility:
         print("Total indexed: {} into ES; current res: {}".format(total_count, res))
         return res
 
-    def index_text_data(self, field_name, index_name, text_iterator, bsize=100):
-        """
-        Args:
-            field_name (str): Name of field to index text under
-            index_name (str): Name of ES index to put data in
-            text_iterator (iterable): iterable of text to index
-            bsize (int): write batch size
-        """
-        id_counter = 0
-        chunk = []
-        for text in text_iterator:
-            update_doc = {
-                "_op_type": "index",
-                "_index": index_name,
-                "_type": "_doc",
-                field_name: text,
-                '_id': id_counter
-            }
-            id_counter += 1
-            chunk.append(update_doc)
-            if id_counter % bsize == 0:
-                helpers.bulk(self.es, chunk, index=index_name, doc_type="_doc")
-                chunk = []
-        if len(chunk) > 0:
-            helpers.bulk(self.es, chunk, index=index_name, doc_type="_doc", refresh=True)
-        print('Finished indexing {} documents'.format(id_counter))
 
-    def create_index(self, index_name, body):
-        self.es.indices.create(index=index_name, body=body)
+def get_keyterms_query(_id, field_name, dg, shard_size=100):
+    """ Get keyterms query by looking for significant text in a single document
 
+    min_doc_count must be 1, since only a single _id is being passed.
 
-def get_keyterms_query(_id, field_name, dg, shard_size=100, min_doc_count=3):
+    Args:
+        field_name (str): field name to extract keyterms from
+        dg (int): max number of keyterms to extract
+        shard_size (int): shard_size parameter for significant text. Set to -1
+            to use the full index (memory/time scales with shard size).
+    """
     query = {
         "size": 0,
         "query": {
@@ -147,7 +121,7 @@ def get_keyterms_query(_id, field_name, dg, shard_size=100, min_doc_count=3):
                         "significant_text": {
                             "field": field_name,
                             "size": dg,
-                            'min_doc_count': min_doc_count,
+                            'min_doc_count': 1,
                             'filter_duplicate_text': True,
                         }
                     }
@@ -177,12 +151,13 @@ def get_context_query(ids, keyterms, es_client, field_name):
 
 
 def get_highlight_template(ids, keyterms, field_name, offsets=False, max_fragments=8, fragment_size=100):
+    _should_match = [{'match': {field_name: f}} for f in keyterms]
     template = {
         'query': {
             'bool': {
                 'filter': {'ids': {'values': ids}},
-                'should': [{'match': {field_name: ' '.join(keyterms)}}]
-            }
+                'should': _should_match
+            },
         },
         "highlight": {
             "order": 'none',
@@ -203,17 +178,13 @@ def get_highlight_template(ids, keyterms, field_name, offsets=False, max_fragmen
 
 
 def extract_keyterm_offsets_contexts(offsets, highlights, field_name, leftsep='<em>', rightsep='</em>'):
-    offset = offsets['hits']['hits']
-    highlight = highlights['hits']['hits']
-    try:
-        assert len(offset) == len(highlight) == 1
-    except Exception as e:
-        print()
-        return [], [], []
-    term_offsets = list(chain(*[parse_offsets(line) for line in offset[0]['highlight'][field_name]]))
+    _offset = offsets['hits']['hits']
+    _highlight = highlights['hits']['hits']
+    assert len(_offset) == len(_highlight) == 1
+    term_offsets = list(chain(*[parse_offsets(line) for line in _offset[0]['highlight'][field_name]]))
     keyterms = []
     contexts = []
-    for line in highlight[0]['highlight'][field_name]:
+    for line in _highlight[0]['highlight'][field_name]:
         keyterms.extend(re.findall(r'{}(.*?){}'.format(leftsep, rightsep), line))
         clean_context = re.sub(r'{}|{}'.format(leftsep, rightsep), '', line)
         contexts.append(clean_context)
