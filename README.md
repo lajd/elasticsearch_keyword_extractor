@@ -44,8 +44,10 @@ be matched in the collection, upsert is enabled. </br>
 --max_doc_keyterms      --> Maximum numebr of keyterms to extract</br>
 --bsize                 --> Read/write batch size</br>
 --max_doc_qsize         --> Maximum number of documents to be queued; limits memory usage</br>
---n_extraction_threads  --> Number of threads to use for extracting contexts and offsets</br>
+--n_extracting_threads  --> Number of threads to use for extracting contexts and offsets</br>
 --n_indexing_threads    --> Number of threads to use for writing updates into mongo/ES</br>
+--must_have_fields      --> fields which must be in the document to be elligible for keyword extraction (default is <es_field_name> and <es_highlight_field>)</br> 
+--must_not_have_fields  -->  fields which must not be in the document to be elligible for keyword extraction</br>
 
 </br>
 
