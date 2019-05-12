@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+import string
+from collections import deque
+
 from extractor import Extractor
 from es_utils import ESUtility
 
@@ -18,7 +21,7 @@ FIELD_NAME = 'data'
 DB_NAME = 'test_db'
 COLL_NAME = 'test_coll'
 # Test Params
-NUM_TEST_EXAMPLES = 147
+NUM_TEST_EXAMPLES = 247
 REQUIRED_FIELDS = {'keyterms', 'contexts', 'offsets'}
 
 # Clients
@@ -48,20 +51,21 @@ def test_es_indexing():
     updated_doc_counter = 0
     for batch in es_utility.scroll_indexed_data():
         for d in batch:
-            doc = d['_source']
+            source = d['_source']
             # Since we're re-indexing into ES, we have to check if the document is supposed
             # to have bene udpated or not
-            if FIELD_NAME in doc:
+            if FIELD_NAME in source:
                 # The document contains the keyword_extraction_field, and should be updated. Ensure that
                 # the document contains updated fields (and these fields are not empty)
-                assert REQUIRED_FIELDS.issubset(set(doc.keys()))
+                validate_keywords_contexts_offsets(source)
+                assert REQUIRED_FIELDS.issubset(set(source.keys()))
                 for f in REQUIRED_FIELDS:
-                    assert len(doc[f]) > 0
+                    assert len(source[f]) > 0
                 updated_doc_counter += 1
             else:
                 # If keyword_extraction_field is not in the document, the document should not be updated.
                 # Make sure the document doesn't contain updated fields.
-                assert len(REQUIRED_FIELDS.intersection(set(doc.keys()))) == 0
+                assert len(REQUIRED_FIELDS.intersection(set(source.keys()))) == 0
 
     assert updated_doc_counter == NUM_TEST_EXAMPLES, 'Incorrect number of samples'
 
@@ -71,8 +75,7 @@ def test_mongo_indexing():
     Validate mongo-indexing
     """
     # Re-index
-    es_utility = reindex()
-
+    reindex()
     mongo.drop_database(DB_NAME)
     # Define extractor & extract keyterms, reindexing into ES
     extractor = Extractor(INDEX_NAME, FIELD_NAME, FIELD_NAME, write_updates_to_mongo=True,
@@ -81,15 +84,59 @@ def test_mongo_indexing():
     extractor.extract_and_index_updates()
     coll = mongo[DB_NAME].get_collection(COLL_NAME)
     updated_doc_counter = 0
-    for doc in coll.find():
-        assert REQUIRED_FIELDS.issubset(set(doc.keys()))
+    for source in coll.find():
+        validate_keywords_contexts_offsets(source, index_type='mongo')
+        assert REQUIRED_FIELDS.issubset(set(source.keys()))
         for f in REQUIRED_FIELDS:
-            assert len(doc[f]) > 0
+            assert len(source[f]) > 0
         # Since we're indexing into mongo, we and we only index updates, we don't need to check
         # if the document was supposed to be updates (all documents are updates)
         updated_doc_counter += 1
     assert updated_doc_counter == NUM_TEST_EXAMPLES, 'Incorrect number of samples'
     mongo.drop_database(DB_NAME)
+
+
+def validate_keywords_contexts_offsets(source, index_type='es'):
+    """
+    Iterate through the collection and validate keyword/contexts/offsets
+    """
+    assert index_type in {'es', 'mongo'}, 'index type must be `es` or `mongo`'
+    keyterms, contexts, offsets = source['keyterms'], source['contexts'], source['offsets']
+    if index_type == 'es':
+        data = source[FIELD_NAME]
+        # Only the ES index has the raw data
+        # Keywords should come in the order they appear in the document
+        data_tokens, data_keyterms = deque(data.split()), deque(keyterms)
+        ref_tok = data_keyterms.popleft()
+        while data_tokens:
+            compare_tok = data_tokens.popleft()
+            if compare_tok == ref_tok:
+                continue
+            elif compare_tok.translate(str.maketrans('', '', string.punctuation)) == ref_tok:
+                continue
+            if len(data_keyterms) == 0: break
+            ref_tok = data_keyterms.popleft()
+        # If data_keyterms is not 0, then the keyterms didn't come in order (or weren't found in the document)
+        assert len(data_keyterms) == 0
+        # Check that the term identified by the offset is indeed the keyterm found
+        for k, o in zip(keyterms, offsets):
+            start_idx, end_idx = o
+            assert data[start_idx:end_idx] == k
+    # Check that keyterms come in order in the contexts
+    # In general the elements of context can be overlapping string, and so we
+    # don't expect context_data_toks to be the same as data_tokens. The ordering
+    # of keyterms should be the same though.
+    context_data_toks, data_keyterms = deque(' '.join(contexts).split(' ')), deque(keyterms)
+    ref_tok = data_keyterms.popleft()
+    while context_data_toks:
+        compare_tok = context_data_toks.popleft()
+        if compare_tok == ref_tok:
+            continue
+        elif compare_tok.translate(str.maketrans('', '', string.punctuation)) == ref_tok:
+            continue
+        if len(data_keyterms) == 0: break
+        ref_tok = data_keyterms.popleft()
+    assert len(data_keyterms) == 0
 
 
 class ExampleTextIterator:
