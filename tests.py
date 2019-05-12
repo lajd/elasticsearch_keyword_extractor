@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import string
+import time
 from collections import deque
 
 from extractor import Extractor
@@ -21,7 +22,7 @@ FIELD_NAME = 'data'
 DB_NAME = 'test_db'
 COLL_NAME = 'test_coll'
 # Test Params
-NUM_TEST_EXAMPLES = 247
+NUM_TEST_EXAMPLES = 246
 REQUIRED_FIELDS = {'keyterms', 'contexts', 'offsets'}
 
 # Clients
@@ -47,6 +48,8 @@ def test_es_indexing():
     # Define extractor & extract keyterms, reindexing into ES
     extractor = Extractor(INDEX_NAME, FIELD_NAME, FIELD_NAME)
     extractor.extract_and_index_updates()
+    # TODO: Better way of waiting for all updates to finish?
+    time.sleep(5)
     # Check that the new fields exist in ES and are not empty
     updated_doc_counter = 0
     for batch in es_utility.scroll_indexed_data():
@@ -82,6 +85,8 @@ def test_mongo_indexing():
                           mongo_db_name=DB_NAME, mongo_collection_name=COLL_NAME)
     # Documents should be inserted into a mongo db named 'test_db', into collection 'test_coll'
     extractor.extract_and_index_updates()
+    # TODO: Better way of waiting for all updates to finish?
+    time.sleep(5)
     coll = mongo[DB_NAME].get_collection(COLL_NAME)
     updated_doc_counter = 0
     for source in coll.find():
@@ -141,17 +146,27 @@ def validate_keywords_contexts_offsets(source, index_type='es'):
 
 class ExampleTextIterator:
     """ Example data to index """
-    def __init__(self, n_examples):
+    def __init__(self, n_examples, n_sentences_accuum=5):
         self.n_examples = n_examples
+        self.n_sentences_accuum = n_sentences_accuum
 
     def __iter__(self):
-        c = 0
-        for sent_toks in brown.sents():
-            sent = ' '.join(sent_toks)
-            if c == self.n_examples:
+        total_sents = self.n_examples * self.n_sentences_accuum
+        sents_generator = brown.sents()
+
+        total_count = 0
+        mini_batch_count = 0
+        sent = ''
+        for sent_toks in sents_generator:
+            sent += ' '.join(sent_toks)
+            mini_batch_count += 1
+            if mini_batch_count == self.n_sentences_accuum:
+                yield sent
+                sent = ''
+                mini_batch_count = 0
+            total_count += 1
+            if total_count == total_sents:
                 raise StopIteration
-            yield sent
-            c += 1
 
 
 def index_text_data(es, field_name, index_name, text_iterator, bsize=100, dummy_id_start=0):
