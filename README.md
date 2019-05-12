@@ -11,7 +11,7 @@
 
 </br>
 
-## Usage
+## Description
 Use this script if you're trying to extract keywords from a field in ElasticSearch, perhaps for a machine learning task.</br>
 The script does the following: </br>
 1) Extracts keywords from each indexed document using ES's significant text API</br>
@@ -22,7 +22,39 @@ The script does the following: </br>
 
 </br>
 
-## Examples
+## Example output
+Given `<es_field_name> = data` and `es_highlight_field = data`</br>, example output is: </br>
+
+</br>
+
+`data`</br>
+A veteran Jackson County legislator will ask the Georgia House Monday to back federal aid to education , something it has consistently opposed in the past . </br>
+
+</br>
+
+`offsets`</br>
+[[2, 9], [10, 17], [25, 35], [41, 44], [49, 56], [57, 62], [63, 69], [73, 77], [78, 85], [86, 89], [93, 102], [105, 114], [122, 134], [135, 142], [150, 154]] </br>
+
+</br>
+
+`keyterms`</br>
+['veteran', 'Jackson', 'legislator', 'ask', 'Georgia', 'House', 'Monday', 'back', 'federal', 'aid', 'education', 'something', 'consistently', 'opposed', 'past'] </br>
+
+</br>
+
+`contexts`</br>
+['A veteran Jackson County legislator will ask the Georgia House Monday to back federal aid to education', ' to education , something it has consistently opposed in the past .']</br>
+
+</br>
+
+The (start, end) index of keyterm `i` in `<es_field_name>` is `offset[i]`. </br>
+
+</br>
+
+The keyterms are located in the returned contexts, and so either a word or context emebedding method can be used to extract keyterm-emebeddings. </br>
+</br>
+
+## Example usage
 
 Use case: Read from ES index <es_index_name> and extract (keyterms, contexts, offsets) from field <es_field_name>.
 Extract highlights and positional offsets from field <es_highlight_field>. </br>
@@ -37,6 +69,7 @@ To update each document in <es_index_name>: </br>
 To update documents in MongoDB in database <mongo_db_name> in collection <mongo_collection_name>. If the document cannot
 be matched in the collection, upsert is enabled. </br>
 </br>
+
 `python main.py <es_index_name> <es_field_name> <es_highlight_field> --write_updates_to_mongo True --mongo_db_name <mongo_db_name> --mongo_collection_name <mongo_collection_name>` </br>
 
 
