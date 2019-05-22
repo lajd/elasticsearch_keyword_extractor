@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import re
 from itertools import chain
+from collections import defaultdict
 
 from elasticsearch import Elasticsearch, helpers
 from elasticsearch_dsl import Search
@@ -58,30 +59,29 @@ class ESUtility:
         scroll_size = len(data_scroll['hits']['hits'])
 
         while scroll_size > 0:
-            yield(data_scroll['hits']['hits'])
+            # Make another request to yield termvectors
+            documents = {'ids': [x['_id'] for x in data_scroll['hits']['hits']]}
+            hits = self.es.mtermvectors(
+                body=documents, doc_type='_doc', index=self.index_name,
+                term_statistics=False, field_statistics=False
+            )
+            yield hits['docs']
             data_scroll = self.es.scroll(scroll_id=sid, scroll='5m')
             # Update the scroll ID
             sid = data_scroll['_scroll_id']
             # Get the number of results that returned in the last scroll
             scroll_size = len(data_scroll['hits']['hits'])
-    
-    def text_field_iterator(self, field_name, tokenizer=None):
-        """
-        Args:
-            field_name (str): Text field name to extract tokens for
-            tokenizer (function): Tokenizer which takes as input a string
-                and returns an iterable of string tokens. The default tokenizer
-                is a whitespace tokenizer
-        """
-        if tokenizer is None: tokenizer = lambda x: x.split()
-        # Do a full pass over the data set yielding the tokens from the provided
-        # text field
-        for batch in self.scroll_indexed_data():
-            for d in batch:
-                source = d['_source']
-                text = source[field_name]
-                tokens = tokenizer(text)
-                yield tokens
+
+    @staticmethod
+    def extract_tokens_from_termvectors(d, field_name):
+        # Termvectors are already tokenized; Need to sort position
+        tok_loc_tuples = []
+        for tok, tok_attrs in d['term_vectors'][field_name]['terms'].items():
+            tok_locs_elements = tok_attrs['tokens']
+            for loc_element in tok_locs_elements:
+                tok_loc_tuples.append((tok, loc_element['position']))
+        tokens = [i[0] for i in sorted(tok_loc_tuples, key=lambda x: x[1])]
+        return tokens
 
     def format_update_for_es(self, doc_update):
         return {'_op_type': 'update', '_index': self.index_name,
@@ -133,12 +133,13 @@ def get_keyterms_query(_id, field_name, dg, shard_size=100):
     return query
 
 
-def extract_keyterms_from_queries(queries_batch, es_client, stopwords):
+def extract_keyterms_from_queries(queries_batch, es_client, stopwords, min_bg_count):
+    if min_bg_count is None: min_bg_count = 0
     keyterms_batch = []
     resp = es_client.msearch(body=queries_batch)
     results = [r['aggregations']['sample']['keywords']['buckets'] for r in resp['responses']]
     for r in results:
-        keyterms = set([i['key'] for i in r if i['key'] not in stopwords])
+        keyterms = set([i['key'] for i in r if (i['key'] not in stopwords and i['bg_count'] > min_bg_count)])
         keyterms_batch.append(list(keyterms))
     return keyterms_batch
 
@@ -190,33 +191,37 @@ def extract_keyterm_offsets_contexts(offsets, highlights, field_name, leftsep='<
         # No highlight fields returned
         return [], [], []
     term_offsets = list(chain(*[parse_offsets(line) for line in _offset[0]['highlight'][field_name]]))
+
     keyterms = []
     contexts = []
     for line in _highlight[0]['highlight'][field_name]:
         keyterms.extend(re.findall(r'{}(.*?){}'.format(leftsep, rightsep), line))
         clean_context = re.sub(r'{}|{}'.format(leftsep, rightsep), '', line)
         contexts.append(clean_context)
-    return keyterms, contexts, term_offsets
+    assert len(keyterms) == len(term_offsets)
+
+    toks_to_locs_lookup = defaultdict(list)
+    for i, tok in enumerate(keyterms):
+        toks_to_locs_lookup[tok].append(term_offsets[i])
+
+    return toks_to_locs_lookup, contexts
 
 
-def extract_contexts_from_queries(resp, field_name):
-    batch_keyterms = []
+def extract_payloads_from_queries(resp, field_name):
+    batch_toks_to_locs = []
     batch_contexts = []
-    batch_offsets = []
     # Iterate through offset and highlight responses-pairs
     for i in range(0, len(resp) - 1, 2):
         # Get response dicts
         offsets_resp = resp[i].to_dict()
         highlights_resp = resp[i + 1].to_dict()
         # Extract contexts and offsets
-        keyterms, contexts, offsets = extract_keyterm_offsets_contexts(
+        doc_toks_to_locs, doc_contexts = extract_keyterm_offsets_contexts(
             offsets_resp, highlights_resp, field_name
         )
-        #
-        batch_keyterms.append(keyterms)
-        batch_contexts.append(contexts)
-        batch_offsets.append(offsets)
-    return batch_keyterms, batch_contexts, batch_offsets
+        batch_toks_to_locs.append(doc_toks_to_locs)
+        batch_contexts.append(doc_contexts)
+    return batch_toks_to_locs, batch_contexts
 
 
 def parse_offsets(line):

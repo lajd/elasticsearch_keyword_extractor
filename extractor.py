@@ -2,13 +2,13 @@
 import time
 from threading import Thread
 from collections import deque
-
+import json
 from es_utils import (
     ESUtility,
     get_keyterms_query,
     extract_keyterms_from_queries,
     get_context_query,
-    extract_contexts_from_queries,
+    extract_payloads_from_queries,
 )
 from mongo_utils import MongoUtility
 from elasticsearch_dsl import MultiSearch
@@ -36,12 +36,12 @@ class TaskCompletionManager:
 class Extractor:
     def __init__(self, es_index_name, es_keyword_field, es_highlight_field,
                  shard_size=100, must_have_fields=[], must_not_have_fields=[],
-                 keyword_stopwords='en', max_doc_keyterms=16, bsize=128, max_doc_qsize=256,
+                 keyword_stopwords='en', max_doc_keyterms=16, min_bg_count=None, bsize=128, max_doc_qsize=256,
                  write_updates_to_mongo=False, mongo_db_name=None, mongo_collection_name=None,
-                 n_extracting_threads=4, n_indexing_threads=4):
+                 n_extracting_threads=4, n_indexing_threads=4, use_termvectors=False):
         """
         Args:
-            es_index_name (str): Name of elasticsearch index
+            es_index_name (str): Name of elasticsearch indexc
             es_keyword_field (str): Name of field in ES from which to extract significant text
             es_highlight_field (str): Name of field in ES from which to highlight and obtain contexts for keywords
             shard_size (int): Shard size for significant text
@@ -72,6 +72,8 @@ class Extractor:
         self.keyword_stopwords = keyword_stopwords
         self.max_doc_qsize = max_doc_qsize
         self.max_doc_keyterms = max_doc_keyterms
+        self.min_bg_count = min_bg_count
+        self.use_termvectors = use_termvectors
         self.bsize = bsize
         self.must_have_fields = must_have_fields
         self.must_not_have_fields = must_not_have_fields
@@ -111,8 +113,10 @@ class Extractor:
         batch_keyterms_queries = []
         # We only consider documents which have the keyword and highlight field, plus any additional fields specified
         _must_have_fields = self.must_have_fields + [self.es_keyword_field, self.es_highlight_field]
-        ids_generator = self.es_utility.scroll_indexed_data(bsize=self.bsize, only_ids=True,
-                    fields_must_exist=_must_have_fields, fields_must_not_exist=self.must_not_have_fields)
+        ids_generator = self.es_utility.scroll_indexed_data(
+            bsize=self.bsize, only_ids=True, fields_must_exist=_must_have_fields,
+            fields_must_not_exist=self.must_not_have_fields,
+        )
         
         for i, doc_batch in enumerate(ids_generator, 1):
             # If the queue is full, wait
@@ -129,7 +133,7 @@ class Extractor:
                 batch_keyterms_queries.extend(keyterms_queries)
             # Add the batch to the queue
             batch['keyterms'].extend(extract_keyterms_from_queries(
-                batch_keyterms_queries, self.es_utility.es, self.keyword_stopwords
+                batch_keyterms_queries, self.es_utility.es, self.keyword_stopwords, self.min_bg_count,
             ))
             self.keyterms_query_batches.append(batch)
             batch = {'_ids': [], 'keyterms': []}
@@ -158,29 +162,47 @@ class Extractor:
                 # Queue is empty
                 time.sleep(1)
                 continue
-
             # Execute keyterms queries
-            ms = MultiSearch(index=self.es_index_name).using(self.es_utility.es)
-            for _id, _keyterms in zip(batch['_ids'], batch['keyterms']):
-                offsets_search, highlight_search = get_context_query(
-                    [_id], _keyterms, self.es_utility.es, self.es_highlight_field
-                )
-                ms = ms.add(offsets_search).add(highlight_search)
-            #
-            resp = ms.execute(raise_on_error=True)
-            batch_keyterms, batch_contexts, batch_offsets = extract_contexts_from_queries(resp, self.es_highlight_field)
-            #
-            for _id, keyterms, contexts, offsets in zip(batch['_ids'], batch_keyterms, batch_contexts, batch_offsets):
-                if len(keyterms) == len(contexts) == len(offsets) == 0:
+            if self.use_termvectors:
+                # When we use termvectors, we can't extract highlight/offset information
+                # from the anlayzed/tokenized field, and so we have to extract from the termvectors.
+                termvecs = self.es_utility.es.mtermvectors(ids=batch['_ids'], index=self.es_index_name, doc_type='_doc')
+                # Since we don't know the order of the returned termvectors, we create a lookup
+                doc_termvector_lookup = {x['_id']: x['term_vectors'][self.es_highlight_field]['terms'] for x in termvecs['docs']}
+                # Create a lookup from keyterms to their locations
+                batch_toks_to_locs = []
+                for i, (_id, tv_attrs) in enumerate(zip(batch['_ids'], termvecs['docs'])):
+                    keyterms_set = set(batch['keyterms'][i])
+                    doc_tok_offsets = {}
+                    for tok, tok_attrs in doc_termvector_lookup[_id].items():
+                        if tok in keyterms_set:
+                            doc_tok_offsets[tok] = [(x['start_offset'], x['end_offset']) for x in tok_attrs['tokens']]
+                    batch_toks_to_locs.append(doc_tok_offsets)
+
+                # Collecting contexts is tricky, since we can't extract contexts from the analyzed field.
+                # We could extract from the raw field, however this would require another request.
+                # For now we just add no contexts
+                batch_contexts = ['NA (termvecters)']*len(batch_toks_to_locs)
+            else:
+                ms = MultiSearch(index=self.es_index_name).using(self.es_utility.es)
+                for _id, _keyterms in zip(batch['_ids'], batch['keyterms']):
+                    offsets_search, highlight_search = get_context_query(
+                        [_id], _keyterms, self.es_utility.es, self.es_highlight_field
+                    )
+                    ms = ms.add(offsets_search).add(highlight_search)
+                resp = ms.execute(raise_on_error=True)
+                batch_toks_to_locs, batch_contexts = extract_payloads_from_queries(resp, self.es_highlight_field)
+                #
+            for _id, tok_locs, contexts in zip(batch['_ids'], batch_toks_to_locs, batch_contexts):
+                if len(tok_locs) == len(contexts) == 0:
                     # No highlight results could be returned; don't update this document
                     continue
                 else:
                     _update = {
                         '_id': _id,
                         'body': {
-                            "keyterms": keyterms,
+                            "keyterm_locs": json.dumps(tok_locs),
                             'contexts': contexts,
-                            'offsets': offsets
                         }
                     }
                     self.updates.append(_update)
