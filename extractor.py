@@ -3,6 +3,7 @@ import time
 from threading import Thread
 from collections import deque
 import json
+import ssl
 
 from es_utils import ESUtility
 
@@ -19,6 +20,13 @@ from mongo_utils import MongoUtility
 from elasticsearch_dsl import MultiSearch
 import nltk
 from nltk.corpus import stopwords
+
+try:
+    _create_unverified_https_context = ssl._create_unverified_context
+except AttributeError:
+    pass
+else:
+    ssl._create_default_https_context = _create_unverified_https_context
 
 nltk.download('stopwords')
 
@@ -204,10 +212,18 @@ class Extractor:
                 batch_toks_to_locs, batch_contexts = extract_contexts_and_keyterm_offsets(resp, self.es_highlight_field, extract_context=self.extract_contexts)
             if self.extract_contexts:
                 for _id, keyterm_locs, contexts in zip(batch['_ids'], batch_toks_to_locs, batch_contexts):
-                    self.updates.append({'_id': _id, 'body': {"keyterm_locs": json.dumps(keyterm_locs), 'contexts': contexts}})
+                    if keyterm_locs is None:
+                        keyterms = offsets = None
+                    else:
+                        keyterms, offsets = list(keyterm_locs.keys()), list(keyterm_locs.values())
+                    self.updates.append({'_id': _id, 'body': {"keyterms": keyterms, 'offsets': offsets, 'contexts': contexts}})
             else:
                 for _id, keyterm_locs in zip(batch['_ids'], batch_toks_to_locs):
-                    self.updates.append({'_id': _id, 'body': {"keyterm_locs": json.dumps(keyterm_locs)}})
+                    if keyterm_locs is None:
+                        keyterms = offsets = None
+                    else:
+                        keyterms, offsets = list(keyterm_locs.keys()), list(keyterm_locs.values())
+                    self.updates.append({'_id': _id, 'body': {"keyterms": keyterms, 'offsets': offsets}})
         # Notify that the thread has finished
         self.task_manager.add_completed('updates_extraction')
 

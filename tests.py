@@ -63,7 +63,7 @@ def test_es_indexing_w_contexts():
                 validate_keywords_contexts_offsets(source, extract_contexts=True)
                 updated_doc_counter += 1
             else:
-                assert len({'keyterm_locs', 'contexts'}.intersection(set(source.keys()))) == 0
+                assert len({'keyterms', 'offsets', 'contexts'}.intersection(set(source.keys()))) == 0
     # Check that the number of updated documents is as expected
     assert updated_doc_counter == NUM_TEST_EXAMPLES
 
@@ -86,14 +86,14 @@ def test_es_indexing_w_contexts_and_termvectors():
                 termvectors = get_es_termvectors(d['_id'], TOKENIZED_FIELD_NAME)
                 # Make sure the keyterms and contexts indeed come from termvectors
                 field_termvec_tokens_set = set(termvectors['terms'].keys())
-                keyterm_locs = json.loads(source['keyterm_locs'])
-                if keyterm_locs is None:
+                keyterms = source['keyterms']
+                if keyterms is None:
                     # Keyterms did not meet filter criteria (i.e. min_bg_count)
                     continue
-                assert set(keyterm_locs.keys()).issubset(field_termvec_tokens_set)
+                assert set(keyterms).issubset(field_termvec_tokens_set)
                 assert set(chain(*source['contexts'])).issubset(field_termvec_tokens_set)
             else:
-                assert len({'keyterm_locs', 'contexts'}.intersection(set(source.keys()))) == 0
+                assert len({'keyterms', 'offsets', 'contexts'}.intersection(set(source.keys()))) == 0
     assert updated_doc_counter == NUM_TEST_EXAMPLES
 
 
@@ -113,7 +113,7 @@ def test_es_indexing_without_contexts():
                 validate_keywords_contexts_offsets(source, extract_contexts=False)
                 updated_doc_counter += 1
             else:
-                assert len({'keyterm_locs', 'contexts'}.intersection(set(source.keys()))) == 0
+                assert len({'keyterms', 'offsets', 'contexts'}.intersection(set(source.keys()))) == 0
     assert updated_doc_counter == NUM_TEST_EXAMPLES
 
 
@@ -142,14 +142,14 @@ def test_mongo_indexing_w_contexts():
 
 def validate_keywords_contexts_offsets(source, index_type='es', extract_contexts=False):
     """ Validate an updated document """
-    assert 'keyterm_locs' in source
+    assert 'keyterms' in source and 'offsets' in source
     # Keyterms are stored as a json string
-    keyterm_locs = json.loads(source['keyterm_locs'])
-    if keyterm_locs is None:
-        # When keyterm_locs is None it is because the extracted keyterms could not meet the filter criteria
+    keyterms = source['keyterms']
+    offsets = source['offsets']
+    if keyterms is None:
+        # When keyterms is None it is because the extracted keyterms could not meet the filter criteria
         # (i.e. min_bg_count). This should only happen when min_bg_count > 1
         return
-    field_keyterms = keyterm_locs.keys()
     if index_type == 'es':
         field_text = source[FIELD_NAME]
     else:
@@ -163,7 +163,7 @@ def validate_keywords_contexts_offsets(source, index_type='es', extract_contexts
     field_tokens_set = set(tokenizer.word_tokenizer(field_text))
     field_tokens_set = expand_tokens_set_to_split_by_punct(field_tokens_set)
     # To account for how ES handles punctuation, we use both tokenized and non-tokenized forms of each token
-    for k in field_keyterms:
+    for k in keyterms:
         try:
             assert k in field_tokens_set
         except AssertionError:
@@ -171,9 +171,9 @@ def validate_keywords_contexts_offsets(source, index_type='es', extract_contexts
             assert k.translate(str.maketrans('', '', string.punctuation)) in field_tokens_set
 
     # Check that the keyterm offsets correspond with the raw text field
-    for keyterms, offsets in keyterm_locs.items():
-        for start_idx, end_idx in offsets:
-            assert field_text[start_idx:end_idx] == keyterms
+    for keyterm, offset in zip(keyterms, offsets):
+        for start_idx, end_idx in offset:
+            assert field_text[start_idx:end_idx] == keyterm
 
     if extract_contexts:
         assert 'contexts' in source
@@ -183,7 +183,7 @@ def validate_keywords_contexts_offsets(source, index_type='es', extract_contexts
         for ctx in contexts:
             context_tokens_set = context_tokens_set.union(tokenizer.word_tokenizer(ctx))
             context_tokens_set = expand_tokens_set_to_split_by_punct(context_tokens_set)
-        for keyterm in field_keyterms:
+        for keyterm in keyterms:
             try:
                 assert keyterm in context_tokens_set
             except AssertionError:

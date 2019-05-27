@@ -90,3 +90,17 @@ class ESUtility:
         print("Total indexed: {} into ES; current res: {}".format(total_count, res))
         return res
 
+    def create_completion_suggestor_over_keywords(self):
+        body = {
+                "mappings": {
+                    "properties" : {
+                        "suggest" : {
+                            "type" : "completion"
+                        },
+                        "title": {
+                            "type": "keyword"
+                        }
+                    }
+                }
+            }
+
