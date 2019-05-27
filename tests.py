@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-import string
 import time
-from collections import deque
+import json
+import string
+from itertools import chain
+import re
 
+from segtok import tokenizer
 from extractor import Extractor
 from es_utils import ESUtility
+
 
 import nltk
 from nltk.corpus import brown
@@ -18,12 +22,12 @@ nltk.download('brown')
 # ES
 INDEX_NAME = 'test'
 FIELD_NAME = 'data'
+TOKENIZED_FIELD_NAME = 'data.tokenized'
 # Mongo
 DB_NAME = 'test_db'
 COLL_NAME = 'test_coll'
 # Test Params
 NUM_TEST_EXAMPLES = 246
-REQUIRED_FIELDS = {'keyterms', 'contexts', 'offsets'}
 
 # Clients
 es = Elasticsearch([{'host': 'localhost', 'port': 9200}], timeout=5, request_timeout=5)
@@ -38,110 +42,153 @@ def test_mongo_connection():
     assert mongo[DB_NAME].command('ping')
 
 
-def test_es_indexing():
+def test_es_indexing_w_contexts():
     """
     Validate es-indexing
     """
-    # Re-index
+    # Index both dummy-documents (not contained the desired field) and
+    # documents containing the desired field
     es_utility = reindex()
-
     # Define extractor & extract keyterms, reindexing into ES
-    extractor = Extractor(INDEX_NAME, FIELD_NAME, FIELD_NAME)
+    extractor = Extractor(INDEX_NAME, FIELD_NAME, FIELD_NAME, extract_contexts=True)
     extractor.extract_and_index_updates()
-    # TODO: Better way of waiting for all updates to finish?
-    time.sleep(5)
-    # Check that the new fields exist in ES and are not empty
+    time.sleep(3)  # Sleep to allow updates to index
+    # Iterate though all documents. If the document is supposed to be updated
+    # (i.e. FIELD_NAME is in source), then validate that the document is updated.
     updated_doc_counter = 0
     for batch in es_utility.scroll_indexed_data():
         for d in batch:
             source = d['_source']
-            # Since we're re-indexing into ES, we have to check if the document is supposed
-            # to have bene udpated or not
             if FIELD_NAME in source:
-                # The document contains the keyword_extraction_field, and should be updated. Ensure that
-                # the document contains updated fields (and these fields are not empty)
-                validate_keywords_contexts_offsets(source)
-                assert REQUIRED_FIELDS.issubset(set(source.keys()))
-                for f in REQUIRED_FIELDS:
-                    assert len(source[f]) > 0
+                validate_keywords_contexts_offsets(source, extract_contexts=True)
                 updated_doc_counter += 1
             else:
-                # If keyword_extraction_field is not in the document, the document should not be updated.
-                # Make sure the document doesn't contain updated fields.
-                assert len(REQUIRED_FIELDS.intersection(set(source.keys()))) == 0
-
-    assert updated_doc_counter == NUM_TEST_EXAMPLES, 'Incorrect number of samples'
+                assert len({'keyterm_locs', 'contexts'}.intersection(set(source.keys()))) == 0
+    # Check that the number of updated documents is as expected
+    assert updated_doc_counter == NUM_TEST_EXAMPLES
 
 
-def test_mongo_indexing():
+def test_es_indexing_w_contexts_and_termvectors():
+    """
+    Validate es-indexing with termvectors
+    """
+    es_utility = reindex(use_termvectors=True)
+    # Extract termvectors
+    extractor = Extractor(INDEX_NAME, TOKENIZED_FIELD_NAME, TOKENIZED_FIELD_NAME, extract_contexts=True, use_termvectors=True)
+    extractor.extract_and_index_updates()
+    time.sleep(3)  # Sleep to allow updates to index
+    updated_doc_counter = 0
+    for batch in es_utility.scroll_indexed_data():
+        for d in batch:
+            source = d['_source']
+            if FIELD_NAME in source:
+                updated_doc_counter += 1
+                termvectors = get_es_termvectors(d['_id'], TOKENIZED_FIELD_NAME)
+                # Make sure the keyterms and contexts indeed come from termvectors
+                field_termvec_tokens_set = set(termvectors['terms'].keys())
+                keyterm_locs = json.loads(source['keyterm_locs'])
+                if keyterm_locs is None:
+                    # Keyterms did not meet filter criteria (i.e. min_bg_count)
+                    continue
+                assert set(keyterm_locs.keys()).issubset(field_termvec_tokens_set)
+                assert set(chain(*source['contexts'])).issubset(field_termvec_tokens_set)
+            else:
+                assert len({'keyterm_locs', 'contexts'}.intersection(set(source.keys()))) == 0
+    assert updated_doc_counter == NUM_TEST_EXAMPLES
+
+
+def test_es_indexing_without_contexts():
+    """
+    Validate es-indexing without contexts
+    """
+    es_utility = reindex()
+    extractor = Extractor(INDEX_NAME, FIELD_NAME, FIELD_NAME)
+    extractor.extract_and_index_updates()
+    time.sleep(3)  # Sleep to allow updates to index
+    updated_doc_counter = 0
+    for batch in es_utility.scroll_indexed_data():
+        for d in batch:
+            source = d['_source']
+            if FIELD_NAME in source:
+                validate_keywords_contexts_offsets(source, extract_contexts=False)
+                updated_doc_counter += 1
+            else:
+                assert len({'keyterm_locs', 'contexts'}.intersection(set(source.keys()))) == 0
+    assert updated_doc_counter == NUM_TEST_EXAMPLES
+
+
+def test_mongo_indexing_w_contexts():
     """
     Validate mongo-indexing
     """
-    # Re-index
     reindex()
     mongo.drop_database(DB_NAME)
-    # Define extractor & extract keyterms, reindexing into ES
-    extractor = Extractor(INDEX_NAME, FIELD_NAME, FIELD_NAME, write_updates_to_mongo=True,
-                          mongo_db_name=DB_NAME, mongo_collection_name=COLL_NAME)
-    # Documents should be inserted into a mongo db named 'test_db', into collection 'test_coll'
+    # Write updates to mongo instead of ES
+    extractor = Extractor(
+        INDEX_NAME, FIELD_NAME, FIELD_NAME, write_updates_to_mongo=True,
+        mongo_db_name=DB_NAME,  mongo_collection_name=COLL_NAME, extract_contexts=True
+    )
+    # Need to wait for all mongo updates to index
     extractor.extract_and_index_updates()
-    # TODO: Better way of waiting for all updates to finish?
-    time.sleep(5)
+    time.sleep(3)  # Sleep to allow updates to index
     coll = mongo[DB_NAME].get_collection(COLL_NAME)
     updated_doc_counter = 0
     for source in coll.find():
-        validate_keywords_contexts_offsets(source, index_type='mongo')
-        assert REQUIRED_FIELDS.issubset(set(source.keys()))
-        for f in REQUIRED_FIELDS:
-            assert len(source[f]) > 0
-        # Since we're indexing into mongo, we and we only index updates, we don't need to check
-        # if the document was supposed to be updates (all documents are updates)
+        validate_keywords_contexts_offsets(source, index_type='mongo', extract_contexts=True)
         updated_doc_counter += 1
-    assert updated_doc_counter == NUM_TEST_EXAMPLES, 'Incorrect number of samples'
+    assert updated_doc_counter == NUM_TEST_EXAMPLES
     mongo.drop_database(DB_NAME)
 
 
-def validate_keywords_contexts_offsets(source, index_type='es'):
-    """
-    Iterate through the collection and validate keyword/contexts/offsets
-    """
-    assert index_type in {'es', 'mongo'}, 'index type must be `es` or `mongo`'
-    keyterms, contexts, offsets = source['keyterms'], source['contexts'], source['offsets']
+def validate_keywords_contexts_offsets(source, index_type='es', extract_contexts=False):
+    """ Validate an updated document """
+    assert 'keyterm_locs' in source
+    # Keyterms are stored as a json string
+    keyterm_locs = json.loads(source['keyterm_locs'])
+    if keyterm_locs is None:
+        # When keyterm_locs is None it is because the extracted keyterms could not meet the filter criteria
+        # (i.e. min_bg_count). This should only happen when min_bg_count > 1
+        return
+    field_keyterms = keyterm_locs.keys()
     if index_type == 'es':
-        data = source[FIELD_NAME]
-        # Only the ES index has the raw data
-        # Keywords should come in the order they appear in the document
-        data_tokens, data_keyterms = deque(data.split()), deque(keyterms)
-        ref_tok = data_keyterms.popleft()
-        while data_tokens:
-            compare_tok = data_tokens.popleft()
-            if compare_tok == ref_tok:
-                continue
-            elif compare_tok.translate(str.maketrans('', '', string.punctuation)) == ref_tok:
-                continue
-            if len(data_keyterms) == 0: break
-            ref_tok = data_keyterms.popleft()
-        # If data_keyterms is not 0, then the keyterms didn't come in order (or weren't found in the document)
-        assert len(data_keyterms) == 0
-        # Check that the term identified by the offset is indeed the keyterm found
-        for k, o in zip(keyterms, offsets):
-            start_idx, end_idx = o
-            assert data[start_idx:end_idx] == k
-    # Check that keyterms come in order in the contexts
-    # In general the elements of context can be overlapping string, and so we
-    # don't expect context_data_toks to be the same as data_tokens. The ordering
-    # of keyterms should be the same though.
-    context_data_toks, data_keyterms = deque(' '.join(contexts).split(' ')), deque(keyterms)
-    ref_tok = data_keyterms.popleft()
-    while context_data_toks:
-        compare_tok = context_data_toks.popleft()
-        if compare_tok == ref_tok:
-            continue
-        elif compare_tok.translate(str.maketrans('', '', string.punctuation)) == ref_tok:
-            continue
-        if len(data_keyterms) == 0: break
-        ref_tok = data_keyterms.popleft()
-    assert len(data_keyterms) == 0
+        field_text = source[FIELD_NAME]
+    else:
+        # Mongo doesn't have the raw text field; get from ES
+        doc_id = source['_id']
+        es_source = get_es_source(doc_id)
+        field_text = es_source[FIELD_NAME]
+
+    # Because of ambiguity with punctuation when extracting keyterms, we
+    # include tokens split by punct and removed punct
+    field_tokens_set = set(tokenizer.word_tokenizer(field_text))
+    field_tokens_set = expand_tokens_set_to_split_by_punct(field_tokens_set)
+    # To account for how ES handles punctuation, we use both tokenized and non-tokenized forms of each token
+    for k in field_keyterms:
+        try:
+            assert k in field_tokens_set
+        except AssertionError:
+            # Try the keyterm without punct
+            assert k.translate(str.maketrans('', '', string.punctuation)) in field_tokens_set
+
+    # Check that the keyterm offsets correspond with the raw text field
+    for keyterms, offsets in keyterm_locs.items():
+        for start_idx, end_idx in offsets:
+            assert field_text[start_idx:end_idx] == keyterms
+
+    if extract_contexts:
+        assert 'contexts' in source
+        contexts = source['contexts']
+        # Check that the contexts cover all the identified keyterms
+        context_tokens_set = set()
+        for ctx in contexts:
+            context_tokens_set = context_tokens_set.union(tokenizer.word_tokenizer(ctx))
+            context_tokens_set = expand_tokens_set_to_split_by_punct(context_tokens_set)
+        for keyterm in field_keyterms:
+            try:
+                assert keyterm in context_tokens_set
+            except AssertionError:
+                # Try the keyterm without punct
+                assert keyterm.translate(str.maketrans('', '', string.punctuation)) in context_tokens_set
 
 
 class ExampleTextIterator:
@@ -169,7 +216,7 @@ class ExampleTextIterator:
                 raise StopIteration
 
 
-def index_text_data(es, field_name, index_name, text_iterator, bsize=100, dummy_id_start=0):
+def index_text_data(es, field_name, index_name, text_iterator, bsize=100, num_docs_indexed=0):
     """
     Args:
         es (Elasticsearch client object): ES client
@@ -177,9 +224,9 @@ def index_text_data(es, field_name, index_name, text_iterator, bsize=100, dummy_
         index_name (str): Name of ES index to put data in
         text_iterator (iterable): iterable of text to index
         bsize (int): write batch size
-        dummy_id_start (int):
+        num_docs_indexed (int): Counter of how many docs have already been indexed
     """
-    id_counter = dummy_id_start
+    id_counter = num_docs_indexed
     chunk = []
     for text in text_iterator:
         chunk.append({"_op_type": "index", "_index": index_name, "_type": "_doc", field_name: text, '_id': id_counter})
@@ -192,16 +239,85 @@ def index_text_data(es, field_name, index_name, text_iterator, bsize=100, dummy_
     print('Finished indexing {} documents'.format(id_counter))
 
 
-def reindex():
+def reindex(use_termvectors=False, num_dummy_documents=100):
     # Re-index
     if es.indices.exists(INDEX_NAME): es.indices.delete(INDEX_NAME)
-    es.indices.create(INDEX_NAME, {})
+
+    if use_termvectors:
+        mapping = get_tokenized_field_mapping(FIELD_NAME)
+        es.indices.create(index=INDEX_NAME, body=mapping)
+        es.indices.refresh(index=INDEX_NAME)
+    else:
+        es.indices.create(INDEX_NAME, {})
     es_utility = ESUtility(index_name=INDEX_NAME)
     # Index arbitrary amount of data under a field we're not interested in
-    arbitrary_count = 100
-    index_text_data(es_utility.es, 'not_used_field', INDEX_NAME, ExampleTextIterator(arbitrary_count))
+    index_text_data(es_utility.es, 'not_used_field', INDEX_NAME, ExampleTextIterator(num_dummy_documents))
     # Index NUM_TEST_EXAMPLES data under the field we are interested in
-    index_text_data(es_utility.es, FIELD_NAME, INDEX_NAME, ExampleTextIterator(NUM_TEST_EXAMPLES), dummy_id_start=arbitrary_count)
+    index_text_data(es_utility.es, FIELD_NAME, INDEX_NAME, ExampleTextIterator(NUM_TEST_EXAMPLES), num_docs_indexed=num_dummy_documents)
     index_doc_count = es.indices.stats()['indices'][INDEX_NAME]['total']['docs']['count']
-    assert index_doc_count == arbitrary_count + NUM_TEST_EXAMPLES
+    assert index_doc_count == num_dummy_documents + NUM_TEST_EXAMPLES
     return es_utility
+
+
+def get_es_source(doc_id):
+    query = {"query": {"ids": {"values": [doc_id] }}}
+    res = es.search(index=INDEX_NAME,body=query)
+    return res['hits']['hits'][0]['_source']
+
+
+def get_es_termvectors(doc_id, field_name):
+    termvecs = es.termvectors(id=doc_id, index=INDEX_NAME, doc_type='_doc')
+    return termvecs['term_vectors'][field_name]
+
+
+def expand_tokens_set_to_split_by_punct(tokens_set):
+    # Include words split by punctuation
+    punct_split_tokens_set = set(list(chain(*[re.findall(r"[\w]+|[.,!?;\"\']", i) for i in tokens_set])))
+    removed_punct_tokens_set = set([i.translate(str.maketrans('', '', string.punctuation)) for i in tokens_set])
+    return tokens_set.union(punct_split_tokens_set).union(removed_punct_tokens_set)
+
+
+def get_tokenized_field_mapping(field_name):
+    """ Apply dummy analysis to demonstrate termvectors """
+    body = {
+        "settings": {
+            "analysis": {
+                "filter": {
+                    "filter_stemmer": {
+                        "type": "stemmer",
+                        "language": "english"
+                    }
+                },
+                "analyzer": {
+                    "text_analyzer": {
+                        "type": "custom",
+                        "tokenizer": "standard",
+                        "filter": [
+                            "standard",
+                            "lowercase",
+                            "filter_stemmer"
+                        ],
+                    }
+                }
+            }
+        },
+        "mappings": {
+            "_doc": {
+                "properties": {
+                    field_name: {
+                        "type": "text",
+                        "analyzer": "standard",
+                        "fields": {
+                            "tokenized": {
+                                "analyzer": "text_analyzer",
+                                "type": "text",
+                                "term_vector": "with_positions_offsets",
+                                "store": "true"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return body

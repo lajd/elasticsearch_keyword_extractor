@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-import re
-from itertools import chain
-from collections import defaultdict
-
 from elasticsearch import Elasticsearch, helpers
-from elasticsearch_dsl import Search
 
 
 class ESUtility:
@@ -18,8 +13,7 @@ class ESUtility:
             raise RuntimeError('Index {} not found'.format(index_name))
         self.read_bsize = read_bsize
     
-    def scroll_indexed_data(self, bsize=128, only_ids=False, randomized=False,
-                            fields_must_exist=[], fields_must_not_exist=[]):
+    def scroll_indexed_data(self, bsize=128, only_ids=False, randomized=False, fields_must_exist=[], fields_must_not_exist=[], use_termvectors=False):
         fields_must_exist = list(set(fields_must_exist))
         fields_must_not_exist = list(set(fields_must_not_exist))
         default_body = {
@@ -60,12 +54,16 @@ class ESUtility:
 
         while scroll_size > 0:
             # Make another request to yield termvectors
-            documents = {'ids': [x['_id'] for x in data_scroll['hits']['hits']]}
-            hits = self.es.mtermvectors(
-                body=documents, doc_type='_doc', index=self.index_name,
-                term_statistics=False, field_statistics=False
-            )
-            yield hits['docs']
+            hits = data_scroll['hits']['hits']
+            if use_termvectors:
+                documents = {'ids': [x['_id'] for x in hits]}
+                termvecs = self.es.mtermvectors(
+                    body=documents, doc_type='_doc', index=self.index_name,
+                    term_statistics=False, field_statistics=False
+                )
+                yield termvecs['docs']
+            else:
+                yield hits
             data_scroll = self.es.scroll(scroll_id=sid, scroll='5m')
             # Update the scroll ID
             sid = data_scroll['_scroll_id']
@@ -92,140 +90,3 @@ class ESUtility:
         print("Total indexed: {} into ES; current res: {}".format(total_count, res))
         return res
 
-
-def get_keyterms_query(_id, field_name, dg, shard_size=100):
-    """ Get keyterms query by looking for significant text in a single document
-
-    min_doc_count must be 1, since only a single _id is being passed.
-
-    Args:
-        field_name (str): field name to extract keyterms from
-        dg (int): max number of keyterms to extract
-        shard_size (int): shard_size parameter for significant text. Set to -1
-            to use the full index (memory/time scales with shard size).
-    """
-    query = {
-        "size": 0,
-        "stored_fields": [],
-        "query": {
-            "ids": {
-                "values": _id
-            }
-        },
-        "aggregations": {
-            "sample": {
-                "sampler": {
-                    "shard_size": shard_size
-                },
-                "aggregations": {
-                    "keywords": {
-                        "significant_text": {
-                            "field": field_name,
-                            "size": dg,
-                            'min_doc_count': 1,
-                            'filter_duplicate_text': True,
-                        }
-                    }
-                }
-            }
-        }
-    }
-    return query
-
-
-def extract_keyterms_from_queries(queries_batch, es_client, stopwords, min_bg_count):
-    if min_bg_count is None: min_bg_count = 0
-    keyterms_batch = []
-    resp = es_client.msearch(body=queries_batch)
-    results = [r['aggregations']['sample']['keywords']['buckets'] for r in resp['responses']]
-    for r in results:
-        keyterms = set([i['key'] for i in r if (i['key'] not in stopwords and i['bg_count'] > min_bg_count)])
-        keyterms_batch.append(list(keyterms))
-    return keyterms_batch
-
-
-def get_context_query(ids, keyterms, es_client, field_name):
-    highlight_template = get_highlight_template(ids, keyterms, field_name, offsets=False)
-    offset_template = get_highlight_template(ids, keyterms, field_name, offsets=True)
-    highlight_search = Search().using(es_client).update_from_dict(highlight_template)
-    offsets_search = Search().using(es_client).update_from_dict(offset_template)
-    return offsets_search, highlight_search
-
-
-def get_highlight_template(ids, keyterms, field_name, offsets=False, max_fragments=8, fragment_size=100):
-    _should_match = [{'match': {field_name: f}} for f in keyterms]
-    template = {
-        "stored_fields": [],
-        'query': {
-            'bool': {
-                'filter': {'ids': {'values': ids}},
-                'should': _should_match
-            },
-        },
-        "highlight": {
-            "order": 'none',
-            'number_of_fragments': max_fragments,
-            'fragment_size': fragment_size,
-            "fields": {
-                field_name: {
-                    "type": "experimental",
-                    "options": {
-                        "return_offsets": offsets,
-                        'remove_high_freq_terms_from_common_terms': False,
-                    },
-                },
-            },
-        }
-    }
-    return template
-
-
-def extract_keyterm_offsets_contexts(offsets, highlights, field_name, leftsep='<em>', rightsep='</em>'):
-    _offset = offsets['hits']['hits']
-    _highlight = highlights['hits']['hits']
-    assert len(_offset) == len(_highlight) == 1
-    try:
-        _ = _offset[0]['highlight']
-        _ = _highlight[0]['highlight']
-    except KeyError:
-        # No highlight fields returned
-        return [], [], []
-    term_offsets = list(chain(*[parse_offsets(line) for line in _offset[0]['highlight'][field_name]]))
-
-    keyterms = []
-    contexts = []
-    for line in _highlight[0]['highlight'][field_name]:
-        keyterms.extend(re.findall(r'{}(.*?){}'.format(leftsep, rightsep), line))
-        clean_context = re.sub(r'{}|{}'.format(leftsep, rightsep), '', line)
-        contexts.append(clean_context)
-    assert len(keyterms) == len(term_offsets)
-
-    toks_to_locs_lookup = defaultdict(list)
-    for i, tok in enumerate(keyterms):
-        toks_to_locs_lookup[tok].append(term_offsets[i])
-
-    return toks_to_locs_lookup, contexts
-
-
-def extract_payloads_from_queries(resp, field_name):
-    batch_toks_to_locs = []
-    batch_contexts = []
-    # Iterate through offset and highlight responses-pairs
-    for i in range(0, len(resp) - 1, 2):
-        # Get response dicts
-        offsets_resp = resp[i].to_dict()
-        highlights_resp = resp[i + 1].to_dict()
-        # Extract contexts and offsets
-        doc_toks_to_locs, doc_contexts = extract_keyterm_offsets_contexts(
-            offsets_resp, highlights_resp, field_name
-        )
-        batch_toks_to_locs.append(doc_toks_to_locs)
-        batch_contexts.append(doc_contexts)
-    return batch_toks_to_locs, batch_contexts
-
-
-def parse_offsets(line):
-    """ Parse offsets returned from search-highlighter plugin """
-    roi = line.split(':')[1].split(':')[0].split(',')
-    _term_offsets = [(int(x[0]), int(x[1])) for x in [r.split('-') for r in roi]]
-    return _term_offsets
