@@ -46,6 +46,19 @@ def get_keyterms_query(_id, field_name, dg, shard_size=100):
 
 
 def extract_keyterms_from_queries(queries_batch, es_client, stopwords, min_bg_count):
+    """
+    Execute a batch of keyterm-extraction-queries and extract the corresponding
+    keyterms from the response.
+
+    Args:
+        queries_batch (list): List of keyterm-extraction-queries. Each query corresponds to a single document
+        es_client (object): ES client object
+        stopwords (set): Set of stopwords which can't be keyterms
+        min_bg_count (int): Minimum number of times a word must exist in the text field to be elligible as a keyword
+
+    Returns:
+        keyterms_batch (list of list): List of keyterms for each document, ordered the same as the input queries_batch
+    """
     keyterms_batch = []
     resp = es_client.msearch(body=queries_batch)
     results = [r['aggregations']['sample']['keywords']['buckets'] for r in resp['responses']]
@@ -55,21 +68,49 @@ def extract_keyterms_from_queries(queries_batch, es_client, stopwords, min_bg_co
     return keyterms_batch
 
 
-def get_context_query(ids, keyterms, es_client, field_name):
-    highlight_template = get_highlight_template(ids, keyterms, field_name, offsets=False)
-    offset_template = get_highlight_template(ids, keyterms, field_name, offsets=True)
+def get_context_and_offset_query(_id, keyterms, es_client, field_name):
+    """
+    Get the context and offset query corresponding to the document id
+
+    Args:
+        _id (str): Document id to extract the context/offset for
+        keyterms (list): Extracted keywords corresponding to the document id
+        es_client (object): ES client object
+        field_name (str): Name of the ES field for which to extract the context/offset for the given keywords
+
+    Returns:
+        offsets_search (ES search object): Offset query corresponding to the document id
+        highlight_search (ES search object): Context query corresponding to the document id
+    """
+    highlight_template = get_highlight_template(_id, keyterms, field_name, offsets=False)
+    offset_template = get_highlight_template(_id, keyterms, field_name, offsets=True)
     highlight_search = Search().using(es_client).update_from_dict(highlight_template)
     offsets_search = Search().using(es_client).update_from_dict(offset_template)
     return offsets_search, highlight_search
 
 
-def get_highlight_template(ids, keyterms, field_name, offsets=False, max_fragments=8, fragment_size=100):
+def get_highlight_template(_id, keyterms, field_name, offsets=False, max_fragments=8, fragment_size=100):
+    """
+    Template for extracting context and offset queries using the wikimedia search-highlighter plugin
+    https://github.com/wikimedia/search-highlighter
+
+
+    Args:
+        _id (str): Document id to extract the context/offset for
+        keyterms (list): Extracted keywords corresponding to the document id
+        offsets (bool): Whether to return the offset query (offsets=True) or the context query (offsets=False)
+        max_fragments (int): Maximum number of context-fragments to return
+        fragment_size (int): Number of characters for each fragment
+
+    Returns:
+        template (dict): Template for either an offset-query or a context-query
+    """
     _should_match = [{'match': {field_name: f}} for f in keyterms]
     template = {
         "stored_fields": [],
         'query': {
             'bool': {
-                'filter': {'ids': {'values': ids}},
+                'filter': {'ids': {'values': [_id]}},
                 'should': _should_match
             },
         },
@@ -92,6 +133,25 @@ def get_highlight_template(ids, keyterms, field_name, offsets=False, max_fragmen
 
 
 def extract_contexts_and_keyterm_offsets(resp, field_name, leftsep='<em>', rightsep='</em>', extract_context=False):
+    """
+    Extract the keyterms and offsets (and optionally, the keyterm contexts) from a raw ES text field.
+
+    Args:
+        resp (ES response): Response containing the keyterm and offsets (and optionally, the context) data
+        field_name (str): ES field name which the keyterm/offsets/contexts are extracted from
+        leftsep (str): ES starting string used to indicate a keyterm
+        rightsep (str): ES ending string used to indicate a keyterm
+        extract_context (bool): Whether or not to extract context information. If True, all of keyterms/offsets
+            and contexts will be etracted. If False, only the keyterms and offsets are extracted.
+
+    Returns:
+        batch_toks_to_locs (list): List of keyterm offsets, for each document in the batch. The keyterm offsets 
+            correspond to the keyterms, and so the ith keyterm-offset is all the positions of keyterm i in the text.
+        batch_contexts (list or None): List of contexts corresponding to each document in the batch.  There's not a 
+            one-to-one correspondence between keyterms and contexts (in order to prevent overlapping contexts),
+             but all keyterms show up in one (or more) of the contexts. If extract_context is False, 
+             then batch_contets is None. 
+    """
     batch_toks_to_locs = []
     batch_contexts = []
     # Iterate through offset and highlight responses-pairs
@@ -134,7 +194,26 @@ def extract_contexts_and_keyterm_offsets(resp, field_name, leftsep='<em>', right
         return batch_toks_to_locs, None
 
 
-def extract_termvectors_contexts_and_keyterm_offsets(doc_termvectors, keyterms_set, word_fragment_size=3, extract_context=False):
+def extract_termvectors_contexts_and_keyterm_offsets(doc_termvectors, keyterms_set, word_fragment_size=3, 
+                                                     extract_context=False):
+    """
+    Extract the keyterms and offsets (and optionally, the keyterm contexts) from an analyzed ES text field
+    (using the termvectors for that document).
+
+    Args:
+        doc_termvectors (dict): The (analyzed) termvectors of the document
+        keyterms_set (set): The set of keyterms for the document
+        word_fragment_size (int): When extracting contexts from termvectors, the number of words to use to the
+            left and the right of the keyterm
+        extract_context (bool): Whether or not to extract context information. If True, all of keyterms/offsets
+            and contexts will be etracted. If False, only the keyterms and offsets are extracted.
+
+    Returns:
+        keyterm_offsets (list): List of keyterm offsets for the document. 
+        batch_contexts (list or None): Contexts corresponding to the document. There's not a one-to-one correspondence
+            between keyterms and contexts (in order to prevent overlapping contexts), but all keyterms show up in 
+            one (or more) of the contexts. If extract_context is False, then batch_contets is None. 
+    """
     contexts = []
     doc_tokens = list(doc_termvectors.keys())
 
@@ -149,7 +228,11 @@ def extract_termvectors_contexts_and_keyterm_offsets(doc_termvectors, keyterms_s
     if len(positions) == 0:
         # No keyterms could be extracted because keyterms did not meet filter criteria (i.e. min_bg_count)
         return None, None
-
+    
+    # Below we extract contexts for the keyterms. Similarly to the case when extracting contexts for a raw text field
+    # (i.e. not analyzed field), we don't extract overlapping contexts. That is, rather than extracting overlapping
+    # contexts for keyterms, we simply enlarge the previous context to include the keyterm and surrounding 
+    # word_fragment_size context  terms. 
     if extract_context:
         # In order to find context windows, we use the sorted positions.
         sorted_positions = sorted(positions)
@@ -172,7 +255,14 @@ def extract_termvectors_contexts_and_keyterm_offsets(doc_termvectors, keyterms_s
 
 
 def parse_offsets(line):
-    """ Parse offsets returned from search-highlighter plugin """
+    """ Parse offsets returned from search-highlighter plugin 
+    
+    Args:
+        line (str): string of term-offsets returned by the search-highlighter plugin
+    
+    Returns:
+        term_offsets (list of tuples):  Offsets of each term in the termvectors for the document.
+    """
     roi = line.split(':')[1].split(':')[0].split(',')
-    _term_offsets = [(int(x[0]), int(x[1])) for x in [r.split('-') for r in roi]]
-    return _term_offsets
+    term_offsets = [(int(x[0]), int(x[1])) for x in [r.split('-') for r in roi]]
+    return term_offsets

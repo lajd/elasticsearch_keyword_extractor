@@ -2,21 +2,22 @@
 import time
 from threading import Thread
 from collections import deque
-import json
 import ssl
 
-from es_utils import ESUtility
+from db_utils import (
+    ESUtility,
+    MongoUtility,
+)
 
 from extraction_utils import (
     get_keyterms_query,
     extract_keyterms_from_queries,
-    get_context_query,
+    get_context_and_offset_query,
     extract_contexts_and_keyterm_offsets,
     extract_termvectors_contexts_and_keyterm_offsets
 )
 
 
-from mongo_utils import MongoUtility
 from elasticsearch_dsl import MultiSearch
 import nltk
 from nltk.corpus import stopwords
@@ -49,7 +50,7 @@ class TaskCompletionManager:
 class Extractor:
     def __init__(self, es_index_name, es_keyword_field, es_highlight_field,
                  shard_size=100, must_have_fields=[], must_not_have_fields=[],
-                 keyword_stopwords='en', max_doc_keyterms=16, min_bg_count=2, bsize=128, max_doc_qsize=256,
+                 keyword_stopwords='en', max_doc_keyterms=16, min_bg_count=1, bsize=128, max_doc_qsize=256,
                  write_updates_to_mongo=False, mongo_db_name=None, mongo_collection_name=None,
                  n_extracting_threads=4, n_indexing_threads=4, use_termvectors=False, termvectors_window_size=3,
                  extract_contexts=False):
@@ -172,9 +173,8 @@ class Extractor:
     def extract_keyterms_and_contexts(self):
         """ Execute keyterms and highlight/offset queries
 
-        Task 2: Extract (keyterms, contexts, offsets) updates and
-        add to queue for indexing. Execute task over multiple threads
-        to speed things up.
+        Task 2: Extract keyterms and offsets (and optionally contexts). Add the corresponding ES/mongo updates
+            to an update queue for indexing. Execute task over multiple threads to speed things up.
         """
         while self.task_manager.task_running('keyterm_query_fetching') or len(self.keyterms_query_batches) > 0:
             try:
@@ -206,7 +206,7 @@ class Extractor:
             else:
                 ms = MultiSearch(index=self.es_index_name).using(self.es_utility.es)
                 for _id, _keyterms in zip(batch['_ids'], batch['keyterms']):
-                    offsets_search, highlight_search = get_context_query([_id], _keyterms, self.es_utility.es, self.es_highlight_field)
+                    offsets_search, highlight_search = get_context_and_offset_query(_id, _keyterms, self.es_utility.es, self.es_highlight_field)
                     ms = ms.add(offsets_search).add(highlight_search)
                 resp = ms.execute(raise_on_error=True)
                 batch_toks_to_locs, batch_contexts = extract_contexts_and_keyterm_offsets(resp, self.es_highlight_field, extract_context=self.extract_contexts)
@@ -228,7 +228,7 @@ class Extractor:
         self.task_manager.add_completed('updates_extraction')
 
     def index_updates(self):
-        """ Index (keyterms, contexts, offsets) updates
+        """ Index the keyterm/offset (and optionally, context) updates from the updates queue.
 
         Task 3: Index udpates into either ES or Mongo. Execute over
         multiple threads.

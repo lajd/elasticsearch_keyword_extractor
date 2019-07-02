@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 import time
-import json
 import string
 from itertools import chain
 import re
 
 from segtok import tokenizer
 from extractor import Extractor
-from es_utils import ESUtility
+from db_utils import ESUtility
 
 
 import nltk
@@ -34,6 +33,10 @@ es = Elasticsearch([{'host': 'localhost', 'port': 9200}], timeout=5, request_tim
 mongo = MongoClient("mongodb://localhost:27017", serverSelectionTimeoutMS=2000)
 
 
+# Notes:
+# In all the tests we enforce min_bg_count=1, since we are using a small ES index and can't be sure
+# of the count of tokens.
+
 def test_es_connection():
     assert es.ping()
 
@@ -50,7 +53,7 @@ def test_es_indexing_w_contexts():
     # documents containing the desired field
     es_utility = reindex()
     # Define extractor & extract keyterms, reindexing into ES
-    extractor = Extractor(INDEX_NAME, FIELD_NAME, FIELD_NAME, extract_contexts=True)
+    extractor = Extractor(INDEX_NAME, FIELD_NAME, FIELD_NAME, extract_contexts=True, min_bg_count=1)
     extractor.extract_and_index_updates()
     time.sleep(3)  # Sleep to allow updates to index
     # Iterate though all documents. If the document is supposed to be updated
@@ -74,7 +77,8 @@ def test_es_indexing_w_contexts_and_termvectors():
     """
     es_utility = reindex(use_termvectors=True)
     # Extract termvectors
-    extractor = Extractor(INDEX_NAME, TOKENIZED_FIELD_NAME, TOKENIZED_FIELD_NAME, extract_contexts=True, use_termvectors=True)
+    extractor = Extractor(INDEX_NAME, TOKENIZED_FIELD_NAME, TOKENIZED_FIELD_NAME,
+                          extract_contexts=True, use_termvectors=True, min_bg_count=1)
     extractor.extract_and_index_updates()
     time.sleep(3)  # Sleep to allow updates to index
     updated_doc_counter = 0
@@ -102,7 +106,7 @@ def test_es_indexing_without_contexts():
     Validate es-indexing without contexts
     """
     es_utility = reindex()
-    extractor = Extractor(INDEX_NAME, FIELD_NAME, FIELD_NAME)
+    extractor = Extractor(INDEX_NAME, FIELD_NAME, FIELD_NAME, min_bg_count=1)
     extractor.extract_and_index_updates()
     time.sleep(3)  # Sleep to allow updates to index
     updated_doc_counter = 0
@@ -126,7 +130,7 @@ def test_mongo_indexing_w_contexts():
     # Write updates to mongo instead of ES
     extractor = Extractor(
         INDEX_NAME, FIELD_NAME, FIELD_NAME, write_updates_to_mongo=True,
-        mongo_db_name=DB_NAME,  mongo_collection_name=COLL_NAME, extract_contexts=True
+        mongo_db_name=DB_NAME,  mongo_collection_name=COLL_NAME, extract_contexts=True, min_bg_count=1
     )
     # Need to wait for all mongo updates to index
     extractor.extract_and_index_updates()
