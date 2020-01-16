@@ -1,0 +1,5 @@
+**/docker-compose/mnt/**
+**/venv/
+**/.git
+**/.pytest_cache
+**/__pycache__/

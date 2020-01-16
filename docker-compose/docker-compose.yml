@@ -1,0 +1,73 @@
+version: '3.7'
+services:
+  elasticsearch:
+    image: lajd94/elasticsearch:6.5.4
+    container_name: elasticsearch
+    environment:
+      - bootstrap.memory_lock=true
+      - "ES_JAVA_OPTS=-Xms4g -Xmx4g"
+      - discovery.type=single-node
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - 9200:9200
+    networks:
+      - keyword_extraction
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana-oss:6.1.1
+    container_name: kibana
+    environment:
+      - SERVER_NAME=localhost
+      - ELASTICSEARCH_URL=http://elasticsearch:9200
+    depends_on:
+      - elasticsearch
+    ulimits:
+      nproc: 65535
+      memlock:
+        soft: -1
+        hard: -1
+    cap_add:
+      - ALL
+    ports:
+      - 5601:5601
+    networks:
+      - keyword_extraction
+
+  mongo:
+    image: mongo:4-bionic
+    container_name: mongo
+    volumes:
+      - mongo-data:/mnt/mongo_data
+    command: bash -c "mongod --dbpath=/mnt/mongo_data --bind_ip 0.0.0.0"
+    ports:
+      - 27017:27017
+    restart: always
+    networks:
+      - keyword_extraction
+
+volumes:
+  es-data:
+    driver: local
+    driver_opts:
+      o: bind
+      type: none
+      device: $PWD/docker-compose/mnt/es_data/
+
+  mongo-data:
+    driver: local
+    driver_opts:
+      o: bind
+      type: none
+      device: $PWD/docker-compose/mnt/mongo_data
+
+networks:
+  keyword_extraction:
+    driver: bridge

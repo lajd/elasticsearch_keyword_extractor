@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 
-from extractor import Extractor
+from extraction.extractor import Extractor
 
 
 parser = argparse.ArgumentParser(
@@ -33,6 +33,8 @@ parser.add_argument('--n_extracting_threads', type=int, default=4,
                     help='Number of threads to use for extracting contexts and offsets')
 parser.add_argument('--n_indexing_threads', type=int, default=4,
                     help='Number of threads to use for writing updates into mongo/ES')
+parser.add_argument('--elasticsearch_url', type=str, default='http://localhost:9200', required=False,
+                    help='Elasticsearch URL -- defaults to http://localhost:9200')
 # Optional arguments (writing updates to mongo)
 parser.add_argument('--write_updates_to_mongo', type=bool, default=False, required=False,
                     help='Whether to index updates to MongoDB rather than elasticsearch. '
@@ -41,10 +43,14 @@ parser.add_argument('--mongo_db_name', type=str, default=None, required=False,
                     help='When `write_updates_to_mongo = True`, the MongoDB database name to write to')
 parser.add_argument('--mongo_collection_name', type=str, default=None, required=False,
                     help='When `write_updates_to_mongo = True`, the MongoDB collection name to write to')
+parser.add_argument('--mongo_url', type=str, default='mongodb://localhost:27017/', required=False,
+                    help='Mongo URL -- defaults to mongodb://localhost:27017/')
 
 
 if __name__ == '__main__':
     args = parser.parse_args()
     kwargs = vars(args)
+    print('-------------Running keyword extraction with args-------------')
+    print(kwargs)
     extractor = Extractor(**kwargs)
     extractor.extract_and_index_updates()

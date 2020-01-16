@@ -10,18 +10,19 @@ class MongoUtility:
     """
     Write-utility for mongoDB
     """
-    def __init__(self, db_name, collection_name, do_upsert=True):
+    def __init__(self, mongo_url, db_name, collection_name, do_upsert=True):
         # Parameters
         self.db_name = db_name
         self.collection_name = collection_name
         self.upsert = do_upsert
         # Client/collection
-        client = MongoClient('mongodb://localhost:27017/')
+        client = MongoClient(mongo_url)
         assert client[db_name].command('ping'), 'Cannot ping mongo client on localhost:27017'
         print('Successfully pinged mongo')
         self.collection = client[db_name].get_collection(collection_name)
         # Write threads
         self.threads = []
+
     def scroll_indexed_data(self, bsize=128, fields_must_exist=[], fields_must_not_exist=[]):
         """ Method only returns the ids of matching documents
         Returns a batch, since calling functions expect a batch
@@ -35,7 +36,6 @@ class MongoUtility:
             if i % bsize == 0:
                 yield batch
                 batch = []
-        gen = self.scroll_indexed_data(bsize=128, fields_must_exist=['community_path'], fields_must_not_exist=['keyterms'])
 
     def format_update_for_mongo(self, doc_update):
         _update = {k: v for k, v in doc_update['body'].items()}
@@ -56,16 +56,16 @@ class MongoUtility:
             coll.bulk_write(updates, ordered=False)
             print("Total indexed: {} into mongo".format(indexed_count))
         except BulkWriteError as bwe:
-            print(bwe.details)
+            print("ERROR in bulk write::: {}".format(bwe.details))
 
     def n_running_threads(self):
         return sum([t.isAlive() for t in self.threads])
 
 
 class ESUtility:
-    def __init__(self, index_name, read_bsize=100):
+    def __init__(self, elasticsearch_url, index_name, read_bsize=100):
         self.index_name = index_name
-        self.es = Elasticsearch([{'host': 'localhost', 'port': 9200}], timeout=60, request_timeout=60)
+        self.es = Elasticsearch(elasticsearch_url, timeout=60, request_timeout=60)
         assert self.es.ping(), 'Cannot ping elasticsearch on localhost:9200'
         print('Successfully pinged elasticsearch')
         # Check index exists
@@ -149,18 +149,4 @@ class ESUtility:
         res = helpers.bulk(self.es, updates)
         print("Total indexed: {} into ES; current res: {}".format(total_count, res))
         return res
-
-    def create_completion_suggestor_over_keywords(self):
-        body = {
-                "mappings": {
-                    "properties" : {
-                        "suggest" : {
-                            "type" : "completion"
-                        },
-                        "title": {
-                            "type": "keyword"
-                        }
-                    }
-                }
-            }
 

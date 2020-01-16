@@ -4,19 +4,18 @@ from threading import Thread
 from collections import deque
 import ssl
 
-from db_utils import (
+from extraction.db_utils import (
     ESUtility,
     MongoUtility,
 )
 
-from extraction_utils import (
+from extraction.extraction_utils import (
     get_keyterms_query,
     extract_keyterms_from_queries,
     get_context_and_offset_query,
     extract_contexts_and_keyterm_offsets,
     extract_termvectors_contexts_and_keyterm_offsets
 )
-
 
 from elasticsearch_dsl import MultiSearch
 import nltk
@@ -53,7 +52,7 @@ class Extractor:
                  keyword_stopwords='en', max_doc_keyterms=16, min_bg_count=1, bsize=128, max_doc_qsize=256,
                  write_updates_to_mongo=False, mongo_db_name=None, mongo_collection_name=None,
                  n_extracting_threads=4, n_indexing_threads=4, use_termvectors=False, termvectors_window_size=3,
-                 extract_contexts=False):
+                 extract_contexts=False, elasticsearch_url='http://localhost:9200', mongo_url='mongodb://localhost:27017/'):
         """
         Args:
             es_index_name (str): Name of elasticsearch indexc
@@ -75,6 +74,8 @@ class Extractor:
             use_termvectors (bool): Whether to extract keyterms from an analyzed field, requiring to use termvectors
             termvectors_window_size (int): The context-window size to use to the left and right of a keyterm
             extract_contexts (bool): Whether to extract and index contexts
+            elasticsearch_url (str): Elasticsearch URL, local by default
+            mongo_url (str): Mongo DB URL, local by default
         """
         if use_termvectors:
             assert es_keyword_field == es_highlight_field, \
@@ -101,9 +102,9 @@ class Extractor:
         self.termvectors_window_size = termvectors_window_size
         self.extract_contexts = extract_contexts
         # Elasticsearch/mongo connections
-        self.es_utility = ESUtility(es_index_name, read_bsize=bsize)
+        self.es_utility = ESUtility(elasticsearch_url, es_index_name, read_bsize=bsize)
         self.update_formatter, self.write_updater = self.get_writer_and_formatter(
-            write_updates_to_mongo, mongo_db_name, mongo_collection_name
+            write_updates_to_mongo, mongo_url, mongo_db_name, mongo_collection_name
         )
         # Accumulators
         self.keyterms_query_batches = deque()
@@ -112,10 +113,10 @@ class Extractor:
         # Helpers
         self.task_manager = TaskCompletionManager(1, n_extracting_threads, n_indexing_threads)
 
-    def get_writer_and_formatter(self, write_updates_to_mongo, mongo_db_name, mongo_collection_name):
+    def get_writer_and_formatter(self, write_updates_to_mongo, mongo_url, mongo_db_name, mongo_collection_name):
         if write_updates_to_mongo and mongo_db_name is not None and mongo_collection_name is not None:
             # Instead of writing updates to ES, write to mongo
-            mongo_utility = MongoUtility(mongo_db_name, mongo_collection_name)
+            mongo_utility = MongoUtility(mongo_url, mongo_db_name, mongo_collection_name)
             update_formatter = mongo_utility.format_update_for_mongo
             write_updater = mongo_utility.update_documents
             print('Updates will be written to mongo instead of ES')

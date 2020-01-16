@@ -5,9 +5,8 @@ from itertools import chain
 import re
 
 from segtok import tokenizer
-from extractor import Extractor
-from db_utils import ESUtility
-
+from extraction.extractor import Extractor
+from extraction.db_utils import ESUtility
 
 import nltk
 from nltk.corpus import brown
@@ -22,15 +21,20 @@ nltk.download('brown')
 INDEX_NAME = 'test'
 FIELD_NAME = 'data'
 TOKENIZED_FIELD_NAME = 'data.tokenized'
+
 # Mongo
 DB_NAME = 'test_db'
 COLL_NAME = 'test_coll'
+
 # Test Params
 NUM_TEST_EXAMPLES = 246
 
+ELASTICSEARCH_URL = 'http://localhost:9200'
+MONGO_URL = 'mongodb://localhost:27017'
+
 # Clients
-es = Elasticsearch([{'host': 'localhost', 'port': 9200}], timeout=5, request_timeout=5)
-mongo = MongoClient("mongodb://localhost:27017", serverSelectionTimeoutMS=2000)
+es = Elasticsearch(ELASTICSEARCH_URL, timeout=5, request_timeout=5)
+mongo = MongoClient(MONGO_URL, serverSelectionTimeoutMS=2000)
 
 
 # Notes:
@@ -217,7 +221,7 @@ class ExampleTextIterator:
                 mini_batch_count = 0
             total_count += 1
             if total_count == total_sents:
-                raise StopIteration
+                return
 
 
 def index_text_data(es, field_name, index_name, text_iterator, bsize=100, num_docs_indexed=0):
@@ -253,7 +257,7 @@ def reindex(use_termvectors=False, num_dummy_documents=100):
         es.indices.refresh(index=INDEX_NAME)
     else:
         es.indices.create(INDEX_NAME, {})
-    es_utility = ESUtility(index_name=INDEX_NAME)
+    es_utility = ESUtility(elasticsearch_url=ELASTICSEARCH_URL, index_name=INDEX_NAME)
     # Index arbitrary amount of data under a field we're not interested in
     index_text_data(es_utility.es, 'not_used_field', INDEX_NAME, ExampleTextIterator(num_dummy_documents))
     # Index NUM_TEST_EXAMPLES data under the field we are interested in
