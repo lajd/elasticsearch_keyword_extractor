@@ -3,6 +3,7 @@ import time
 from threading import Thread
 from collections import deque
 import ssl
+from extraction.misc_utils import get_logger
 
 from extraction.db_utils import (
     ESUtility,
@@ -30,6 +31,8 @@ else:
 
 nltk.download('stopwords')
 
+logger = get_logger(__name__)
+
 
 class TaskCompletionManager:
     def __init__(self, keyterm_query_fetching_target, updates_extraction_target, updates_indexing_target):
@@ -47,10 +50,10 @@ class TaskCompletionManager:
 
 
 class Extractor:
-    def __init__(self, es_index_name, es_keyword_field, es_highlight_field,
-                 shard_size=100, must_have_fields=[], must_not_have_fields=[],
-                 keyword_stopwords='en', max_doc_keyterms=16, min_bg_count=1, bsize=128, max_doc_qsize=256,
-                 write_updates_to_mongo=False, mongo_db_name=None, mongo_collection_name=None,
+    def __init__(self, es_index_name, es_keyword_field, es_highlight_field, keywords_field_name='keyword',
+                 offsets_field_name='offsets', contexts_field_name='contexts', shard_size=100, must_have_fields=[],
+                 must_not_have_fields=[], keyword_stopwords='en', max_doc_keyterms=16, min_bg_count=1, bsize=128,
+                 max_doc_qsize=256, write_updates_to_mongo=False, mongo_db_name=None, mongo_collection_name=None,
                  n_extracting_threads=4, n_indexing_threads=4, use_termvectors=False, termvectors_window_size=3,
                  extract_contexts=False, elasticsearch_url='http://localhost:9200', mongo_url='mongodb://localhost:27017/'):
         """
@@ -58,6 +61,9 @@ class Extractor:
             es_index_name (str): Name of elasticsearch indexc
             es_keyword_field (str): Name of field in ES from which to extract significant text
             es_highlight_field (str): Name of field in ES from which to highlight and obtain contexts for keywords
+            keywords_field_name (str): Name of the keywords field to extract to
+            offsets_field_name (str): Name of the offsets field to extract to
+            contexts_field_name (str): Name of the contexts field to extract to
             shard_size (int): Shard size for significant text
             must_have_fields (list): Fields which must be in the document (in addition to keyword and highlight fields)
             must_not_have_fields (list): Fields which must not be in the document to be elligible for keyword extraction
@@ -90,6 +96,9 @@ class Extractor:
         self.es_index_name = es_index_name
         self.es_keyword_field = es_keyword_field
         self.es_highlight_field = es_highlight_field
+        self.keywords_field_name = keywords_field_name
+        self.offsets_field_name= offsets_field_name
+        self.contexts_field_name = contexts_field_name
         self.shard_size = shard_size
         self.keyword_stopwords = keyword_stopwords
         self.max_doc_qsize = max_doc_qsize
@@ -119,11 +128,11 @@ class Extractor:
             mongo_utility = MongoUtility(mongo_url, mongo_db_name, mongo_collection_name)
             update_formatter = mongo_utility.format_update_for_mongo
             write_updater = mongo_utility.update_documents
-            print('Updates will be written to mongo instead of ES')
+            logger.info('Updates will be written to mongo instead of ES')
         else:
             update_formatter = self.es_utility.format_update_for_es
             write_updater = self.es_utility.update_documents
-            print('Updates will be written to ES')
+            logger.info('Updates will be written to ES')
         return update_formatter, write_updater
 
     def fetch_keyterm_queries(self):
@@ -162,6 +171,7 @@ class Extractor:
             self.keyterms_query_batches.append(batch)
             batch = {'_ids': [], 'keyterms': []}
             batch_keyterms_queries = []
+
         # Process remaining queries
         if len(batch_keyterms_queries) > 0:
             batch['keyterms'].extend(extract_keyterms_from_queries(
@@ -217,14 +227,14 @@ class Extractor:
                         keyterms = offsets = None
                     else:
                         keyterms, offsets = list(keyterm_locs.keys()), list(keyterm_locs.values())
-                    self.updates.append({'_id': _id, 'body': {"keyterms": keyterms, 'offsets': offsets, 'contexts': contexts}})
+                    self.updates.append({'_id': _id, 'body': {self.keywords_field_name: keyterms, self.offsets_field_name: offsets, self.contexts_field_name: contexts}})
             else:
                 for _id, keyterm_locs in zip(batch['_ids'], batch_toks_to_locs):
                     if keyterm_locs is None:
                         keyterms = offsets = None
                     else:
                         keyterms, offsets = list(keyterm_locs.keys()), list(keyterm_locs.values())
-                    self.updates.append({'_id': _id, 'body': {"keyterms": keyterms, 'offsets': offsets}})
+                    self.updates.append({'_id': _id, 'body': {self.keywords_field_name: keyterms, self.offsets_field_name: offsets}})
         # Notify that the thread has finished
         self.task_manager.add_completed('updates_extraction')
 
@@ -249,6 +259,7 @@ class Extractor:
                 self.indexed_doc_counter += len(updates)
                 self.write_updater(updates, self.indexed_doc_counter)
                 updates = []
+                logger.info("Indexed {} updated documents".format(counter))
 
         # Write remaining updates
         if len(updates) > 0:
@@ -260,14 +271,17 @@ class Extractor:
     def extract_and_index_updates(self):
         """ Run all tasks """
         # Queue keyterms queries
+        logger.info("Starting extraction")
         t1 = time.time()
         Thread(target=self.fetch_keyterm_queries).start()
 
-        # Extract embeddings
+        # Extract keyterms/offsets/contexts
+        logger.info("Extracting keyterms/offsets/contexts")
         for _ in range(self.task_manager.state_map['updates_extraction']['target']):
             Thread(target=self.extract_keyterms_and_contexts).start()
 
         # Index updates
+        logger.info("Indexing updates")
         for _ in range(self.task_manager.state_map['updates_indexing']['target']):
             Thread(target=self.index_updates).start()
 
@@ -275,4 +289,4 @@ class Extractor:
             time.sleep(1)
 
         t2 = time.time()
-        print('Finished updates updates indexing {} updates in {}s'.format(self.indexed_doc_counter, round(t2 - t1, 2)))
+        logger.info('Finished updates updates indexing {} updates in {}s'.format(self.indexed_doc_counter, round(t2 - t1, 2)))

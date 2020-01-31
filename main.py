@@ -13,6 +13,9 @@ parser.add_argument('es_index_name', type=str, help='Name of elasticsearch index
 parser.add_argument('es_keyword_field', type=str, help='Name of elasticsearch field to extract keywords from')
 parser.add_argument('es_highlight_field', type=str, help='Name of elasticsearch field to extract highlights from')
 # Optional arguments
+parser.add_argument('--keywords_field_name', type=str, required=False, default='keywords', help='Extracted keywords field name')
+parser.add_argument('--offsets_field_name', type=str, required=False, default='offsets', help='Extracted offsets field name')
+parser.add_argument('--contexts_field_name', type=str, required=False, default='contexts', help='Extracted contexts field name')
 parser.add_argument('--shard_size', type=int, required=False, default=100, help='Shard size for significant text')
 parser.add_argument('--must_have_fields', type=str, required=False, nargs='*', default=[],
                     help='Fields which must be contained in the document to be elligible for keyword extraction')

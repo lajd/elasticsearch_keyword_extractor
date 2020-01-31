@@ -1,9 +1,10 @@
+IMAGE_NAME=lajd94/elasticsearch-keyword-extractor:latest
 
 build:
-	docker build -t lajd94/elasticsearch-keyword-extractor:latest .
+	docker build -t $(IMAGE_NAME) .
 
 push:
-	docker push lajd94/elasticsearch-keyword-extractor:latest
+	docker push $(IMAGE_NAME)
 
 test-service-up:
 	docker-compose -f docker-compose/docker-compose.yml build \
